@@ -386,6 +386,29 @@ class DATModifierApp:
                     except ValueError:
                         self.log(f"错误: 无法把 BQ卡 [BusName={bus_name}] 的 {param}='{old_val}' 转为float", level="ERROR")
 
+        if st.button("执行修改 (BQ卡)", key="bq_execute", type="primary"):
+            if not bq_input_file:
+                st.warning("请选择输入的 .dat 文件。")
+                return
+            if not bq_output_filename:
+                st.warning("请指定输出文件名。")
+                return
+
+            self.log("开始处理 BQ卡...")
+            original_lines, categorized = self.read_and_parse_dat(bq_input_file.read())
+            if original_lines is None or categorized is None:
+                return
+            self.modify_bq_cards(categorized, bq_dist, bq_owner, bq_vol, bq_min_cap, bq_max_cap, modifications)
+            output_data = self.write_back_dat(original_lines)
+            st.download_button(
+                label="下载修改后的文件",
+                data=output_data,
+                file_name=bq_output_filename,
+                mime="application/octet-stream",
+                key="bq_download"
+            )
+            self.log(f"修改完成，准备下载: {bq_output_filename}")
+
     def create_b_tab(self):
         st.subheader("文件选择 (B卡)")
         b_input_file = st.file_uploader("上传输入.dat文件 (B卡)", type=["dat"], key="b_input")
@@ -450,66 +473,247 @@ class DATModifierApp:
             )
             self.log(f"修改完成，准备下载: {b_output_filename}")
 
-    def create_bq_tab(self):
-        st.subheader("文件选择 (BQ卡)")
-        bq_input_file = st.file_uploader("上传输入.dat文件 (BQ卡)", type=["dat"], key="bq_input")
-        if bq_input_file:
-            self.log_file_upload(bq_input_file)
-        bq_output_filename = st.text_input("输出.dat文件名", value="modified_bq.dat", key="bq_output_filename")
-
-        st.subheader("BQ卡筛选条件")
-        col1, col2, col3, col4, col5 = st.columns(5)
+    def create_l_tab(self):
+        st.subheader("生成 L卡 参数")
+        col1, col2 = st.columns(2)
         with col1:
-            bq_dist = st.text_input("分区(dist, 用逗号分隔, 如 C1,D1)", value="C1,D1", key="bq_dist")
+            l_v = st.text_input("电压等级 (V)", value="525.0", key="l_voltage")
+            l_length = st.text_input("线路长度 (km)", value="1.0", key="l_length")
+            l_n1 = st.text_input("首端名字 (N1)", value="", key="l_n1")
         with col2:
-            bq_owner = st.text_input("所有者(owner, 用逗号分隔, 如 苏,锡)", value="苏,锡", key="bq_owner")
-        with col3:
-            bq_vol = st.text_input("电压(vol_rank)", value="", key="bq_vol_rank")
-        with col4:
-            bq_min_cap = st.text_input("容量下限", value="", key="bq_min_cap")
-        with col5:
-            bq_max_cap = st.text_input("容量上限", value="", key="bq_max_cap")
+            l_n2 = st.text_input("末端名字 (N2)", value="", key="l_n2")
+            l_t = st.selectbox("型号 (T)", options=list(LINE_PARAMETERS.keys()), index=0, key="l_type")
+            l_p = st.text_input("并列号 (P)", value="1", key="l_parallel")
 
-        st.subheader("BQ卡修改字段")
-        modifications = {}
-        for param, ptype in self.bq_parameters.items():
-            with st.expander(f"修改 {param}"):
-                apply = st.checkbox(f"启用 {param} 修改", key=f"bq_{param}_apply")
-                if apply:
-                    if ptype == "str":
-                        method = "set"
-                        value = st.text_input(f"{param} 新值", key=f"bq_{param}_value")
-                    else:
-                        options = ["设值", "乘系数"]
-                        if param in ["pout", "mw_load"]:
-                            options.append("设为容量*系数")
-                        method = st.radio(
-                            f"{param} 修改方式",
-                            options,
-                            key=f"bq_{param}_method",
-                            format_func=lambda x: x
-                        )
-                        if method == "设值":
-                            method = "set"
-                            value = st.text_input(f"{param} 新值", key=f"bq_{param}_value")
-                        elif method == "乘系数":
-                            method = "mul"
-                            value = st.text_input(f"{param} 系数", key=f"bq_{param}_coeff")
-                        else:
-                            method = "pct"
-                            value = st.text_input(f"{param} 容量百分比 (如 0.5 表示 50%)", key=f"bq_{param}_pct")
-                    modifications[param] = {'apply': True, 'method': method, 'value': value}
-                else:
-                    modifications[param] = {'apply': False, 'method': None, 'value': None}
+        if 'l_output' not in st.session_state:
+            st.session_state.l_output = ""
 
-        if st.button("执行修改 (BQ卡)", key="bq_execute", type="primary"):
-            if not bq_input_file:
-                st.warning("请选择输入的 .dat 文件。")
-                return
-            if not bq_output_filename:
-                st.warning("请指定输出文件名。")
+        if st.button("生成 L卡", key="l_generate", type="primary"):
+            try:
+                V = float(l_v.strip())
+            except ValueError:
+                st.error("电压等级 (V) 必须是一个有效的数字。")
+                self.log("错误: 电压等级 (V) 输入无效。", level="ERROR")
                 return
 
-            self.log("开始处理 BQ卡...")
-            original_lines, categorized = self.read_and_parse_dat(bq_input_file.read())
-            if original_lines is None
+            try:
+                L = float(l_length.strip())
+            except ValueError:
+                st.error("线路长度 (km) 必须是一个有效的数字。")
+                self.log("错误: 线路长度 (km) 输入无效。", level="ERROR")
+                return
+
+            N1, N2, T, P = l_n1.strip(), l_n2.strip(), l_t, l_p.strip()
+            if not all([N1, N2, T, P]):
+                st.error("请确保所有字段均已填写。")
+                self.log("错误: 缺少必要的输入字段。", level="ERROR")
+                return
+
+            try:
+                P = int(P)
+            except ValueError:
+                st.error("并列号 (P) 必须是一个有效的整数。")
+                self.log("错误: 并列号 (P) 输入无效。", level="ERROR")
+                return
+
+            try:
+                l_card = create_line(V=V, L=L, N1=N1, N2=N2, T=T, P=P)
+                l_card_str = l_card.gen() + '\n'
+                if not l_card_str:
+                    raise ValueError("生成的 L卡 内容为空。")
+                st.session_state.l_output += l_card_str
+                self.log(f"L卡已生成: \n{l_card_str.rstrip()}")
+            except Exception as e:
+                st.error(f"生成 L卡 失败: {e}")
+                self.log(f"错误: 生成 L卡 失败: {e}", level="ERROR")
+
+        if st.button("清空输出", key="l_clear"):
+            st.session_state.l_output = ""
+            self.log("L卡输出区域已清空。")
+
+        st.subheader("生成的 L卡")
+        st.text_area("L卡输出", value=st.session_state.l_output, height=200, key="l_output")
+
+    def create_t3_tab(self):
+        st.subheader("生成 三卷变 参数")
+        col1, col2 = st.columns(2)
+        with col1:
+            t3_V1 = st.text_input("电压等级 V1", value="525.0", key="t3_v1")
+            t3_V2 = st.text_input("电压等级 V2", value="230.0", key="t3_v2")
+            t3_V3 = st.text_input("电压等级 V3", value="37.0", key="t3_v3")
+            t3_VB = st.text_input("电压等级 VB", value="1.0", key="t3_vb")
+            t3_N1 = st.text_input("节点名称 N1", value="", key="t3_n1")
+            t3_N2 = st.text_input("节点名称 N2", value="", key="t3_n2")
+        with col2:
+            t3_N3 = st.text_input("节点名称 N3", value="", key="t3_n3")
+            t3_NB = st.text_input("节点名称 NB", value="", key="t3_nb")
+            t3_Owner = st.text_input("所有者 Owner", value="", key="t3_owner")
+            t3_cap = st.text_input("容量 cap", value="1000.0", key="t3_cap")
+            t3_x_pu = st.text_input("电抗参数 x_pu1, x_pu2, x_pu3", value="13,64,44", key="t3_x_pu")
+            t3_tap_vol = st.text_input("抽头电压 tap_vol1, tap_vol2, tap_vol3", value="525.0,230.0,37.0", key="t3_tap_vol")
+
+        if 't3_output' not in st.session_state:
+            st.session_state.t3_output = ""
+
+        if st.button("生成 三卷变", key="t3_generate", type="primary"):
+            try:
+                V1 = float(t3_V1.strip())
+                V2 = float(t3_V2.strip())
+                V3 = float(t3_V3.strip())
+                VB = float(t3_VB.strip())
+            except ValueError:
+                st.error("电压等级 (V1, V2, V3, VB) 必须是有效的数字。")
+                self.log("错误: 电压等级 (V1, V2, V3, VB) 输入无效。", level="ERROR")
+                return
+
+            N1, N2, N3, NB, Owner = t3_N1.strip(), t3_N2.strip(), t3_N3.strip(), t3_NB.strip(), t3_Owner.strip()
+            cap, x_pu, tap_vol = t3_cap.strip(), t3_x_pu.strip(), t3_tap_vol.strip()
+
+            if not all([N1, N2, N3, NB, Owner, cap, x_pu, tap_vol]):
+                st.error("请确保所有字段均已填写。")
+                self.log("错误: 缺少必要的输入字段。", level="ERROR")
+                return
+
+            try:
+                cap = float(cap)
+            except ValueError:
+                st.error("容量 (cap) 必须是一个有效的数字。")
+                self.log("错误: 容量 (cap) 输入无效。", level="ERROR")
+                return
+
+            try:
+                x_pu_list = [float(x.strip()) for x in x_pu.split(',')]
+                if len(x_pu_list) != 3:
+                    raise ValueError("x_pu 必须包含三个数值，以逗号分隔。")
+            except ValueError as e:
+                st.error(f"电抗参数 x_pu 无效: {e}")
+                self.log(f"错误: 电抗参数 x_pu 无效: {e}", level="ERROR")
+                return
+
+            try:
+                tap_vol_list = [float(vol.strip()) for vol in tap_vol.split(',')]
+                if len(tap_vol_list) != 3:
+                    raise ValueError("tap_vol 必须包含三个数值，以逗号分隔。")
+            except ValueError as e:
+                st.error(f"抽头电压 tap_vol 无效: {e}")
+                self.log(f"错误: 抽头电压 tap_vol 无效: {e}", level="ERROR")
+                return
+
+            try:
+                t3_card = create_T3(
+                    V1=V1, V2=V2, V3=V3, VB=VB, N1=N1, N2=N2, N3=N3, NB=NB,
+                    Owner=Owner, cap=cap, x_pu=x_pu_list,
+                    tap_vol1=tap_vol_list[0], tap_vol2=tap_vol_list[1], tap_vol3=tap_vol_list[2]
+                )
+                st.session_state.t3_output += t3_card + '\n'
+                self.log(f"三卷变已生成: \n{t3_card.rstrip()}")
+            except Exception as e:
+                st.error(f"生成三卷变失败: {e}")
+                self.log(f"错误: 生成三卷变失败: {e}", level="ERROR")
+
+        if st.button("清空输出", key="t3_clear"):
+            st.session_state.t3_output = ""
+            self.log("三卷变输出区域已清空。")
+
+        st.subheader("生成的 三卷变")
+        st.text_area("三卷变输出", value=st.session_state.t3_output, height=200, key="t3_output")
+
+    def create_t2_tab(self):
+        st.subheader("生成 两卷变T卡 参数")
+        col1, col2 = st.columns(2)
+        with col1:
+            t2_V1 = st.text_input("电压等级 V1", value="525.0", key="t2_v1")
+            t2_V2 = st.text_input("电压等级 V2", value="230.0", key="t2_v2")
+            t2_N1 = st.text_input("节点名称 N1", value="", key="t2_n1")
+            t2_N2 = st.text_input("节点名称 N2", value="", key="t2_n2")
+        with col2:
+            t2_Owner = st.text_input("所有者 Owner", value="", key="t2_owner")
+            t2_cap = st.text_input("容量 cap", value="1000.0", key="t2_cap")
+            t2_x_pu = st.text_input("电抗参数 x_pu", value="13", key="t2_x_pu")
+            t2_tap_vol = st.text_input("抽头电压 tap_vol1, tap_vol2", value="525.0,230.0", key="t2_tap_vol")
+
+        if 't2_output' not in st.session_state:
+            st.session_state.t2_output = ""
+
+        if st.button("生成 两卷变T卡", key="t2_generate", type="primary"):
+            try:
+                V1 = float(t2_V1.strip())
+                V2 = float(t2_V2.strip())
+            except ValueError:
+                st.error("电压等级 (V1, V2) 必须是有效的数字。")
+                self.log("错误: 电压等级 (V1, V2) 输入无效。", level="ERROR")
+                return
+
+            N1, N2, Owner = t2_N1.strip(), t2_N2.strip(), t2_Owner.strip()
+            cap, x_pu, tap_vol = t2_cap.strip(), t2_x_pu.strip(), t2_tap_vol.strip()
+
+            if not all([N1, N2, Owner, cap, x_pu, tap_vol]):
+                st.error("请确保所有字段均已填写。")
+                self.log("错误: 缺少必要的输入字段。", level="ERROR")
+                return
+
+            try:
+                cap = float(cap)
+            except ValueError:
+                st.error("容量 (cap) 必须是一个有效的数字。")
+                self.log("错误: 容量 (cap) 输入无效。", level="ERROR")
+                return
+
+            try:
+                x_pu_val = float(x_pu)
+            except ValueError:
+                st.error("电抗参数 x_pu 必须是一个有效的数字。")
+                self.log("错误: 电抗参数 x_pu 无效。", level="ERROR")
+                return
+
+            try:
+                tap_vol_list = [float(vol.strip()) for vol in tap_vol.split(',')]
+                if len(tap_vol_list) != 2:
+                    raise ValueError("tap_vol 必须包含两个数值，以逗号分隔。")
+            except ValueError as e:
+                st.error(f"抽头电压 tap_vol 无效: {e}")
+                self.log(f"错误: 抽头电压 tap_vol 无效: {e}", level="ERROR")
+                return
+
+            try:
+                t2_card = create_T2(
+                    V1=V1, V2=V2, N1=N1, N2=N2, Owner=Owner, cap=cap,
+                    x_pu=x_pu_val, tap_vol1=tap_vol_list[0], tap_vol2=tap_vol_list[1]
+                )
+                st.session_state.t2_output += t2_card + '\n'
+                self.log(f"两卷变T卡已生成: \n{t2_card.rstrip()}")
+            except Exception as e:
+                st.error(f"生成 两卷变T卡 失败: {e}")
+                self.log(f"错误: 生成 两卷变T卡 失败: {e}", level="ERROR")
+
+        if st.button("清空输出", key="t2_clear"):
+            st.session_state.t2_output = ""
+            self.log("两卷变T卡输出区域已清空。")
+
+        st.subheader("生成的 两卷变T卡")
+        st.text_area("两卷变T卡输出", value=st.session_state.t2_output, height=200, key="t2_output")
+
+def main():
+    st.set_page_config(page_title="PSD-BPA DAT文件批量修改生成工具", layout="wide")
+    st.title("PSD-BPA DAT文件批量修改生成工具")
+    st.markdown("**使用条款**: 本应用仅限授权用户使用。请勿上传敏感数据。")
+
+    app = DATModifierApp()
+
+    tabs = st.tabs(["B卡修改", "BQ卡修改", "L卡生成", "三卷变T*3卡生成", "两卷变T卡生成"])
+    with tabs[0]:
+        app.create_b_tab()
+    with tabs[1]:
+        app.create_bq_tab()
+    with tabs[2]:
+        app.create_l_tab()
+    with tabs[3]:
+        app.create_t3_tab()
+    with tabs[4]:
+        app.create_t2_tab()
+
+    with st.expander("查看日志"):
+        st.text_area("操作日志 (可滚动查看，不可编辑)", value="\n".join(app.logs), height=200, key="log_output")
+
+if __name__ == "__main__":
+    main()
