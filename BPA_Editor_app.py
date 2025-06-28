@@ -386,29 +386,6 @@ class DATModifierApp:
                     except ValueError:
                         self.log(f"错误: 无法把 BQ卡 [BusName={bus_name}] 的 {param}='{old_val}' 转为float", level="ERROR")
 
-        if st.button("执行修改 (BQ卡)", key="bq_execute", type="primary"):
-            if not bq_input_file:
-                st.warning("请选择输入的 .dat 文件。")
-                return
-            if not bq_output_filename:
-                st.warning("请指定输出文件名。")
-                return
-
-            self.log("开始处理 BQ卡...")
-            original_lines, categorized = self.read_and_parse_dat(bq_input_file.read())
-            if original_lines is None or categorized is None:
-                return
-            self.modify_bq_cards(categorized, bq_dist, bq_owner, bq_vol, bq_min_cap, bq_max_cap, modifications)
-            output_data = self.write_back_dat(original_lines)
-            st.download_button(
-                label="下载修改后的文件",
-                data=output_data,
-                file_name=bq_output_filename,
-                mime="application/octet-stream",
-                key="bq_download"
-            )
-            self.log(f"修改完成，准备下载: {bq_output_filename}")
-
     def create_b_tab(self):
         st.subheader("文件选择 (B卡)")
         b_input_file = st.file_uploader("上传输入.dat文件 (B卡)", type=["dat"], key="b_input")
@@ -472,6 +449,81 @@ class DATModifierApp:
                 key="b_download"
             )
             self.log(f"修改完成，准备下载: {b_output_filename}")
+
+    def create_bq_tab(self):
+        st.subheader("文件选择 (BQ卡)")
+        bq_input_file = st.file_uploader("上传输入.dat文件 (BQ卡)", type=["dat"], key="bq_input")
+        if bq_input_file:
+            self.log_file_upload(bq_input_file)
+        bq_output_filename = st.text_input("输出.dat文件名", value="modified_bq.dat", key="bq_output_filename")
+
+        st.subheader("BQ卡筛选条件")
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            bq_dist = st.text_input("分区(dist, 用逗号分隔, 如 C1,D1)", value="C1,D1", key="bq_dist")
+        with col2:
+            bq_owner = st.text_input("所有者(owner, 用逗号分隔, 如 苏,锡)", value="苏,锡", key="bq_owner")
+        with col3:
+            bq_vol = st.text_input("电压(vol_rank)", value="", key="bq_vol_rank")
+        with col4:
+            bq_min_cap = st.text_input("容量下限", value="", key="bq_min_cap")
+        with col5:
+            bq_max_cap = st.text_input("容量上限", value="", key="bq_max_cap")
+
+        st.subheader("BQ卡修改字段")
+        modifications = {}
+        for param, ptype in self.bq_parameters.items():
+            with st.expander(f"修改 {param}"):
+                apply = st.checkbox(f"启用 {param} 修改", key=f"bq_{param}_apply")
+                if apply:
+                    if ptype == "str":
+                        method = "set"
+                        value = st.text_input(f"{param} 新值", key=f"bq_{param}_value")
+                    else:
+                        options = ["设值", "乘系数"]
+                        if param in ["pout", "mw_load"]:
+                            options.append("设为容量*系数")
+                        method = st.radio(
+                            f"{param} 修改方式",
+                            options,
+                            key=f"bq_{param}_method",
+                            format_func=lambda x: x
+                        )
+                        if method == "设值":
+                            method = "set"
+                            value = st.text_input(f"{param} 新值", key=f"bq_{param}_value")
+                        elif method == "乘系数":
+                            method = "mul"
+                            value = st.text_input(f"{param} 系数", key=f"bq_{param}_coeff")
+                        else:
+                            method = "pct"
+                            value = st.text_input(f"{param} 容量百分比 (如 0.5 表示 50%)", key=f"bq_{param}_pct")
+                    modifications[param] = {'apply': True, 'method': method, 'value': value}
+                else:
+                    modifications[param] = {'apply': False, 'method': None, 'value': None}
+
+        if st.button("执行修改 (BQ卡)", key="bq_execute", type="primary"):
+            if not bq_input_file:
+                st.warning("请选择输入的 .dat 文件。")
+                return
+            if not bq_output_filename:
+                st.warning("请指定输出文件名。")
+                return
+
+            self.log("开始处理 BQ卡...")
+            original_lines, categorized = self.read_and_parse_dat(bq_input_file.read())
+            if original_lines is None or categorized is None:
+                return
+            self.modify_bq_cards(categorized, bq_dist, bq_owner, bq_vol, bq_min_cap, bq_max_cap, modifications)
+            output_data = self.write_back_dat(original_lines)
+            st.download_button(
+                label="下载修改后的文件",
+                data=output_data,
+                file_name=bq_output_filename,
+                mime="application/octet-stream",
+                key="bq_download"
+            )
+            self.log(f"修改完成，准备下载: {bq_output_filename}")
 
     def create_l_tab(self):
         st.subheader("生成 L卡 参数")
