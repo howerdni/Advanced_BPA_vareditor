@@ -125,8 +125,12 @@ def _format_string(value, length):
 
 class DATModifierApp:
     def __init__(self):
-        self.logs = []
-        self.uploaded_files = []
+        if 'logs' not in st.session_state:
+            st.session_state.logs = []
+        if 'uploaded_files' not in st.session_state:
+            st.session_state.uploaded_files = []
+        self.logs = st.session_state.logs
+        self.uploaded_files = st.session_state.uploaded_files
         self.b_parameters = {
             "dist": "str",
             "owner": "str",
@@ -156,6 +160,7 @@ class DATModifierApp:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_message = f"[{timestamp}] [{level}] {msg}"
         self.logs.append(log_message)
+        st.session_state.logs = self.logs
         try:
             with open("operation_log.txt", "a", encoding='utf-8') as log_file:
                 log_file.write(log_message + "\n")
@@ -173,6 +178,8 @@ class DATModifierApp:
                 "size_kb": file_size,
                 "timestamp": timestamp
             })
+            st.session_state.logs = self.logs
+            st.session_state.uploaded_files = self.uploaded_files
             try:
                 with open("operation_log.txt", "a", encoding='utf-8') as log_file:
                     log_file.write(log_message + "\n")
@@ -387,6 +394,13 @@ class DATModifierApp:
                         self.log(f"错误: 无法把 BQ卡 [BusName={bus_name}] 的 {param}='{old_val}' 转为float", level="ERROR")
 
     def create_b_tab(self):
+        st.markdown("""
+        **使用说明**:
+        - 上传 PSD-BPA 格式的 `.dat` 文件以修改 B 卡。
+        - 在“筛选条件”中输入分区、所有者和电压等级（可选），用逗号分隔多个值。
+        - 在“修改字段”中选择要修改的参数，设置新值或乘系数。
+        - 点击“执行修改”生成修改后的文件，点击“下载”保存。
+        """)
         st.subheader("文件选择 (B卡)")
         b_input_file = st.file_uploader("上传输入.dat文件 (B卡)", type=["dat"], key="b_input")
         if b_input_file:
@@ -451,6 +465,13 @@ class DATModifierApp:
             self.log(f"修改完成，准备下载: {b_output_filename}")
 
     def create_bq_tab(self):
+        st.markdown("""
+        **使用说明**:
+        - 上传 PSD-BPA 格式的 `.dat` 文件以修改 BQ 卡。
+        - 在“筛选条件”中输入分区、所有者、电压等级和容量范围（可选），用逗号分隔多个值。
+        - 在“修改字段”中选择要修改的参数，支持设值、乘系数或按容量百分比修改。
+        - 点击“执行修改”生成修改后的文件，点击“下载”保存。
+        """)
         st.subheader("文件选择 (BQ卡)")
         bq_input_file = st.file_uploader("上传输入.dat文件 (BQ卡)", type=["dat"], key="bq_input")
         if bq_input_file:
@@ -526,6 +547,12 @@ class DATModifierApp:
             self.log(f"修改完成，准备下载: {bq_output_filename}")
 
     def create_l_tab(self):
+        st.markdown("""
+        **使用说明**:
+        - 输入线路参数（如电压等级、长度、节点名称等）生成 L 卡。
+        - 从“型号 (T)”下拉菜单选择导体类型（如 4-630）。
+        - 点击“生成 L卡”查看结果，点击“清空输出”重置输出区域。
+        """)
         st.subheader("生成 L卡 参数")
         col1, col2 = st.columns(2)
         with col1:
@@ -587,6 +614,12 @@ class DATModifierApp:
         st.text_area("L卡输出", value=st.session_state.l_output, height=200, key="l_output")
 
     def create_t3_tab(self):
+        st.markdown("""
+        **使用说明**:
+        - 输入三卷变参数（如电压等级、节点名称、容量、电抗等）生成 T*3 卡。
+        - 确保电抗参数和抽头电压输入为以逗号分隔的三个数值（如 13,64,44）。
+        - 点击“生成 三卷变”查看结果，点击“清空输出”重置输出区域。
+        """)
         st.subheader("生成 三卷变 参数")
         col1, col2 = st.columns(2)
         with col1:
@@ -671,6 +704,12 @@ class DATModifierApp:
         st.text_area("三卷变输出", value=st.session_state.t3_output, height=200, key="t3_output")
 
     def create_t2_tab(self):
+        st.markdown("""
+        **使用说明**:
+        - 输入两卷变参数（如电压等级、节点名称、容量、电抗等）生成 T 卡。
+        - 确保抽头电压输入为以逗号分隔的两个数值（如 525.0,230.0）。
+        - 点击“生成 两卷变T卡”查看结果，点击“清空输出”重置输出区域。
+        """)
         st.subheader("生成 两卷变T卡 参数")
         col1, col2 = st.columns(2)
         with col1:
@@ -748,7 +787,7 @@ class DATModifierApp:
 def main():
     st.set_page_config(page_title="PSD-BPA DAT文件批量修改生成工具", layout="wide")
     st.title("PSD-BPA DAT文件批量修改生成工具")
-    st.markdown("**使用条款**: 本应用仅限授权用户使用。请勿上传敏感数据。")
+    st.markdown("**使用条款**: 本应用不会保留任何用户上传的数据，所有操作均在会话中临时处理。请确保数据安全。")
 
     app = DATModifierApp()
 
@@ -765,7 +804,8 @@ def main():
         app.create_t2_tab()
 
     with st.expander("查看日志"):
-        st.text_area("操作日志 (可滚动查看，不可编辑)", value="\n".join(app.logs), height=200, key="log_output")
+        st.markdown("**日志说明**: 显示所有操作记录，包括文件上传、修改和生成结果。日志在会话期间保留，可滚动查看。")
+        st.text_area("操作日志 (可滚动查看，不可编辑)", value="\n".join(st.session_state.logs), height=200, key="log_output")
 
 if __name__ == "__main__":
     main()
