@@ -8,6 +8,7 @@ from datetime import datetime
 from cryptography.fernet import Fernet
 import importlib.util
 import sys
+import json
 
 # Decrypt and load BPA_models
 def load_encrypted_module():
@@ -30,9 +31,73 @@ def load_encrypted_module():
 BPA_models = load_encrypted_module()
 BCard = BPA_models.BCard
 BQCard = BPA_models.BQCard
-create_line = BPA_models.create_line
 create_T2 = BPA_models.create_T2
 create_T3 = BPA_models.create_T3
+
+# Embedded line_parameters.json content
+LINE_PARAMETERS = {
+    "4-630": {"r_km": 0.013, "x_km": 0.267, "B1_km": 4.24, "Irate": 4000},
+    "4-400": {"r_km": 0.02, "x_km": 0.28, "B1_km": 4.125, "Irate": 3000},
+    "4-300-2": {"r_km": 0.028, "x_km": 0.282, "B1_km": 4.09, "Irate": 2256},
+    "4-300-1": {"r_km": 0.033, "x_km": 0.27, "B1_km": 3.51, "Irate": 2256},
+    "4-720": {"r_km": 0.011, "x_km": 0.241, "B1_km": 4.69, "Irate": 4240},
+    "4-240": {"r_km": 0.021, "x_km": 0.208, "B1_km": 5.71, "Irate": 2400},
+    "1-400": {"r_km": 0.08, "x_km": 0.41, "B1_km": 2.787, "Irate": 660},
+    "2-300": {"r_km": 0.0541, "x_km": 0.31, "B1_km": 3.62, "Irate": 1128},
+    "2-400": {"r_km": 0.04, "x_km": 0.2975, "B1_km": 3.81, "Irate": 1365},
+    "2-630": {"r_km": 0.0304, "x_km": 0.277, "B1_km": 4.03, "Irate": 1890},
+    "X-1000": {"r_km": 0.0232, "x_km": 0.16, "B1_km": 51.83, "Irate": 750},
+    "X-2000": {"r_km": 0.0201, "x_km": 0.1420, "B1_km": 68.17, "Irate": 1500},
+    "X-2500": {"r_km": 0.018, "x_km": 0.14, "B1_km": 73.51, "Irate": 1890},
+    "8-630": {"r_km": 0.0065, "x_km": 0.2538, "B1_km": 4.51, "Irate": 8000}
+}
+
+def create_line(V=525., L=1, N1='', N2='', T='4-630', P=1):
+    try:
+        voltage = float(V)
+        length = float(L)
+        name1 = str(N1)
+        name2 = str(N2)
+        conductor_type = str(T)
+        par = int(P)
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"无效的输入参数: {e}")
+
+    parameters = LINE_PARAMETERS
+    if conductor_type not in parameters:
+        raise ValueError(f"不支持的线路型号: {conductor_type}")
+
+    params = parameters[conductor_type]
+    try:
+        r_km = float(params["r_km"])
+        x_km = float(params["x_km"])
+        B1_km = float(params["B1_km"])
+        Irate = float(params["Irate"])
+    except (KeyError, ValueError) as e:
+        raise ValueError(f"无效的线路参数内容: {e}")
+
+    factor1 = 1 / ((voltage ** 2) / 100)
+    factor2 = (voltage ** 2) / 100 / 1000000
+
+    r_pu = r_km * length * factor1
+    x_pu = x_km * length * factor1
+    b2_pu = B1_km * length * factor2 / 2
+
+    strLCard0 = f"L     {name1:<8}100. {name2:<8}100.1            0.01              1   投运"
+    lcard_instance = BCard.LCard(strLCard0)
+    lcard_instance._r_pu = lcard_instance._format_value(f"{r_pu:.10f}".lstrip('0'), 6, 5)
+    lcard_instance._x_pu = lcard_instance._format_value(f"{x_pu:.10f}".lstrip('0'), 6, 5)
+    lcard_instance._b2_pu = lcard_instance._format_value(f"{b2_pu:.10f}".lstrip('0'), 6, 5)
+    lcard_instance._length = lcard_instance._format_value(length, 4, 1)
+    lcard_instance.bus_name1 = name1
+    lcard_instance.bus_name2 = name2
+    lcard_instance.vol_rank1 = voltage
+    lcard_instance.vol_rank2 = voltage
+    lcard_instance.parallel = par
+    lcard_instance.length = length
+    lcard_instance.irate = Irate
+
+    return lcard_instance
 
 def _format_string(value, length):
     def char_width(char):
@@ -60,6 +125,7 @@ def _format_string(value, length):
 class DATModifierApp:
     def __init__(self):
         self.logs = []
+        self.uploaded_files = []
         self.b_parameters = {
             "dist": "str",
             "owner": "str",
@@ -94,6 +160,23 @@ class DATModifierApp:
                 log_file.write(log_message + "\n")
         except Exception as e:
             print(f"无法写入日志文件: {e}")
+
+    def log_file_upload(self, file):
+        if file is not None:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            file_size = len(file.getvalue()) / 1024  # Size in KB
+            log_message = f"[{timestamp}] [UPLOAD] File uploaded: {file.name}, Size: {file_size:.2f} KB"
+            self.logs.append(log_message)
+            self.uploaded_files.append({
+                "name": file.name,
+                "size_kb": file_size,
+                "timestamp": timestamp
+            })
+            try:
+                with open("operation_log.txt", "a", encoding='utf-8') as log_file:
+                    log_file.write(log_message + "\n")
+            except Exception as e:
+                print(f"无法写入日志文件: {e}")
 
     def read_and_parse_dat(self, file_content):
         self.log("读取文件内容")
@@ -305,6 +388,8 @@ class DATModifierApp:
     def create_b_tab(self):
         st.subheader("文件选择 (B卡)")
         b_input_file = st.file_uploader("上传输入.dat文件 (B卡)", type=["dat"], key="b_input")
+        if b_input_file:
+            self.log_file_upload(b_input_file)
         b_output_filename = st.text_input("输出.dat文件名", value="modified_b.dat", key="b_output_filename")
 
         st.subheader("B卡筛选条件")
@@ -367,6 +452,8 @@ class DATModifierApp:
     def create_bq_tab(self):
         st.subheader("文件选择 (BQ卡)")
         bq_input_file = st.file_uploader("上传输入.dat文件 (BQ卡)", type=["dat"], key="bq_input")
+        if bq_input_file:
+            self.log_file_upload(bq_input_file)
         bq_output_filename = st.text_input("输出.dat文件名", value="modified_bq.dat", key="bq_output_filename")
 
         st.subheader("BQ卡筛选条件")
@@ -435,19 +522,19 @@ class DATModifierApp:
                 mime="application/octet-stream",
                 key="bq_download"
             )
-            self.log(f"修改完成，准备下载: {b_output_filename}")
+            self.log(f"修改完成，准备下载: {bq_output_filename}")
 
     def create_l_tab(self):
         st.subheader("生成 L卡 参数")
         col1, col2 = st.columns(2)
         with col1:
-            l_v = st.text_input("电压等级 (V)", value="", key="l_voltage")
-            l_length = st.text_input("线路长度 (km)", value="", key="l_length")
+            l_v = st.text_input("电压等级 (V)", value="525.0", key="l_voltage")
+            l_length = st.text_input("线路长度 (km)", value="1.0", key="l_length")
             l_n1 = st.text_input("首端名字 (N1)", value="", key="l_n1")
         with col2:
             l_n2 = st.text_input("末端名字 (N2)", value="", key="l_n2")
-            l_t = st.text_input("型号 (T)", value="", key="l_type")
-            l_p = st.text_input("并列号 (P)", value="", key="l_parallel")
+            l_t = st.selectbox("型号 (T)", options=list(LINE_PARAMETERS.keys()), index=0, key="l_type")
+            l_p = st.text_input("并列号 (P)", value="1", key="l_parallel")
 
         if 'l_output' not in st.session_state:
             st.session_state.l_output = ""
@@ -467,7 +554,7 @@ class DATModifierApp:
                 self.log("错误: 线路长度 (km) 输入无效。", level="ERROR")
                 return
 
-            N1, N2, T, P = l_n1.strip(), l_n2.strip(), l_t.strip(), l_p.strip()
+            N1, N2, T, P = l_n1.strip(), l_n2.strip(), l_t, l_p.strip()
             if not all([N1, N2, T, P]):
                 st.error("请确保所有字段均已填写。")
                 self.log("错误: 缺少必要的输入字段。", level="ERROR")
