@@ -3,9 +3,35 @@ import pandas as pd
 import unicodedata
 import io
 from datetime import datetime
+from cryptography.fernet import Fernet
+import importlib.util
+import sys
 
-# Assuming BPA_models is available with BCard class
-# For this example, we include only necessary dependencies and classes
+# Decrypt and load BPA_models
+def load_encrypted_module():
+    try:
+        with open('key.txt', 'rb') as f:
+            key = f.read()
+        cipher = Fernet(key)
+        with open('BPA_models.encrypted', 'rb') as f:
+            encrypted = f.read()
+        code = cipher.decrypt(encrypted).decode('utf-8')
+        spec = importlib.util.spec_from_loader('BPA_models', loader=None)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules['BPA_models'] = module
+        exec(code, module.__dict__)
+        return module
+    except Exception as e:
+        st.error(f"无法解密 BPA_models.encrypted: {e}")
+        raise
+
+# Load BPA_models and BCard
+try:
+    BPA_models = load_encrypted_module()
+    BCard = BPA_models.BCard
+except Exception as e:
+    st.error(f"加载 BPA_models 失败: {e}")
+    raise
 
 def _format_string(value, length):
     def char_width(char):
@@ -88,7 +114,7 @@ class DATModifierApp:
             line_stripped = line.rstrip('\n')
             if line_stripped.startswith("B "):
                 try:
-                    b_obj = BCard(line_stripped, idx)  # BCard from BPA_models
+                    b_obj = BCard(line_stripped, idx)
                     categorized_objects['B'].append(b_obj)
                     original_lines.append(b_obj)
                 except Exception as e:
