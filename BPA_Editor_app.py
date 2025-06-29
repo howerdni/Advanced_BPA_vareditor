@@ -8,13 +8,16 @@ import importlib.util
 import sys
 import re
 import openpyxl  # Required for Excel output
+import os
 
 # Decrypt and load BPA_models
 def load_encrypted_module():
     try:
-        with open('key.txt', 'rb') as f:
-            key = f.read()
-        cipher = Fernet(key)
+        key = os.environ.get('BPA_MODEL_KEY')
+        if not key:
+            st.error("环境变量 BPA_MODEL_KEY 未设置，请在 Streamlit Cloud 的 Secrets 设置中配置密钥")
+            raise ValueError("环境变量 BPA_MODEL_KEY 未设置")
+        cipher = Fernet(key.encode('utf-8'))
         with open('BPA_models.encrypted', 'rb') as f:
             encrypted = f.read()
         code = cipher.decrypt(encrypted).decode('utf-8')
