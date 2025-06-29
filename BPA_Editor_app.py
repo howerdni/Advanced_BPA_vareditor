@@ -117,7 +117,7 @@ def parse_pfo_data(lines: list, debug=False) -> list:
 
     return records
 
-def check_voltage_anomalies(records: list) -> pd.DataFrame:
+def check_voltage_anomalies(records: list, debug=False) -> pd.DataFrame:
     df = pd.DataFrame([record.to_dict() for record in records])
     if df.empty:
         return df
@@ -134,20 +134,36 @@ def check_voltage_anomalies(records: list) -> pd.DataFrame:
             max_v = 500.0 * 1.10  # 550 kV
             alert_min_v = 500.0 * 1.05  # 525 kV
             if actual < 500.0:
-                return 'Low', (500.0 - actual) / 500.0 * 100
+                status = 'Low'
+                deviation = (500.0 - actual) / 500.0 * 100
             elif actual < min_v:
-                return 'Low', (min_v - actual) / min_v * 100
+                status = 'Low'
+                deviation = (min_v - actual) / min_v * 100
             elif actual > max_v:
-                return 'High', (actual - max_v) / max_v * 100
-            elif actual >= alert_min_v:
-                return 'Alert High', (actual - alert_min_v) / alert_min_v * 100
+                status = 'High'
+                deviation = (actual - max_v) / max_v * 100
+            elif actual >= alert_min_v - 0.1 and actual <= max_v + 0.1:  # Tolerance for floating-point
+                status = 'Alert High'
+                deviation = (actual - alert_min_v) / alert_min_v * 100
+            else:
+                status, deviation = None, None
+            if debug and status:
+                st.write(f"调试: 节点 {row['BusName']}, 额定电压 {rated}, 实际电压 {actual}, 状态 {status}, 偏差 {deviation:.2f}%")
+            return status, deviation
         elif abs(rated - 230.0) < 25.0:  # 220 kV nodes (often rated as 230 kV)
             min_v = 220.0 * 0.95  # 209 kV
             max_v = 220.0 * 1.10  # 242 kV
             if actual < min_v:
-                return 'Low', (min_v - actual) / min_v * 100
+                status = 'Low'
+                deviation = (min_v - actual) / min_v * 100
             elif actual > max_v:
-                return 'High', (actual - max_v) / max_v * 100
+                status = 'High'
+                deviation = (actual - max_v) / max_v * 100
+            else:
+                status, deviation = None, None
+            if debug and status:
+                st.write(f"调试: 节点 {row['BusName']}, 额定电压 {rated}, 实际电压 {actual}, 状态 {status}, 偏差 {deviation:.2f}%")
+            return status, deviation
         return None, None
 
     df[['Status', 'Deviation (%)']] = df.apply(classify_voltage, axis=1, result_type='expand')
@@ -399,7 +415,6 @@ class DATModifierApp:
           - 220 kV 节点（标称 230 kV）：正常范围 209–242 kV
           - 低于 220 kV 的节点不监测
         - 查看异常和警戒节点列表及分区/所有者分布，下载结果为 Excel 文件。
-        - 需安装 openpyxl 库以支持 Excel 输出：`pip install openpyxl`
         """)
         try:
             import openpyxl
@@ -435,7 +450,7 @@ class DATModifierApp:
                 self.log("警告: 未找到有效的母线数据", level="WARNING")
                 return
 
-            anomalies_df = check_voltage_anomalies(records)
+            anomalies_df = check_voltage_anomalies(records, debug=debug_mode)
             if anomalies_df.empty:
                 st.success("未检测到电压异常或警戒高压。")
                 self.log("电压监测完成：未检测到异常或警戒高压")
