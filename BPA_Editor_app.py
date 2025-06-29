@@ -403,12 +403,12 @@ class DATModifierApp:
         - 电压规范：
           - 500 kV 节点（标称电压可能为 525 kV）：
             - 正常范围：500–550 kV
-            - 警戒高压：526–550 kV（需关注但不计为异常）
+            - 预警高压：526–550 kV（需关注但不计为异常）
             - 低于 500 kV 为异常低压
             - 高于 550 kV 为异常高压
           - 220 kV 节点（标称 230 kV）：正常范围 209–242 kV
           - 低于 220 kV 的节点不监测
-        - 查看异常和警戒节点列表及分区/所有者分布，下载异常报告或完整节点数据为 Excel 文件。
+        - 查看异常和预警节点列表及分区/所有者分布，下载异常报告或完整节点数据为 Excel 文件。
         """)
         try:
             import openpyxl
@@ -477,11 +477,11 @@ class DATModifierApp:
                 # Alert High
                 df_500kv_alert = df_500kv[df_500kv['Status'] == 'Alert High']
                 if not df_500kv_alert.empty:
-                    st.write(f"检测到 **{len(df_500kv_alert)}** 个 500 kV 节点警戒高压（526–550 kV）")
+                    st.write(f"检测到 **{len(df_500kv_alert)}** 个 500 kV 节点预警高压（526–550 kV）")
                     st.dataframe(df_500kv_alert[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner']],
                                  use_container_width=True)
                 else:
-                    st.info("未检测到 500 kV 节点警戒高压")
+                    st.info("未检测到 500 kV 节点预警高压")
 
                 # 220 kV Anomalies
                 st.subheader("220 kV 节点电压异常")
@@ -494,7 +494,7 @@ class DATModifierApp:
                     st.info("未检测到 220 kV 节点电压异常")
 
                 # Summary by Dist and Owner
-                st.subheader("异常及警戒分布")
+                st.subheader("异常及预警分布")
                 col1, col2 = st.columns(2)
                 with col1:
                     dist_summary = anomalies_df.groupby('Dist').size().reset_index(name='Count')
@@ -539,7 +539,30 @@ class DATModifierApp:
     def main(self):
         st.set_page_config(page_title="BPA Reactive Power Tuner", layout="wide")
         st.title("BPA Reactive Power Tuner")
-        st.markdown("**使用条款**: 本应用不会保留任何用户上传的数据，所有操作均在会话中临时处理。请确保数据安全。")
+        st.markdown("**注**: 本应用不会保留您上传的任何数据。")
+        st.markdown("结合BPA潮流计算的无功收敛过程，以下是使用本软件的推荐步骤：
+        确认有功收敛：
+        确保BPA潮流计算已实现有功功率收敛，生成.pfo文件。
+        分析电压异常：
+        在“电压监测”标签上传.pfo文件，执行电压监测。
+        查看500 kV和220 kV节点的异常（Low/High）和500 kV警戒高压（Alert High）表格。
+        记录异常节点的Dist、 Owner和BusName，以及建议调整方向：
+        低压（Low）：通常需要增加shunt_var（正值，表示更多电容）。
+        高压（High）或警戒高压（Alert High）：可能需要减少shunt_var（负值，表示更多电感）。
+        调整shunt_var：
+        切换到“B卡并联无功修改”标签，上传原始.dat文件。
+        输入异常节点的dist、 owner和vol_rank（如500或220）进行筛选。
+        设置shunt_var修改：
+        对于低压节点，尝试“设值”（如100）或“乘系数”（如1.2）增加无功。
+        对于高压节点，尝试“设值”（如-50）或“乘系数”（如0.8）减少无功。
+        下载修改后的.dat文件。
+        验证收敛：
+        使用修改后的.dat文件运行BPA潮流计算。
+        生成新的.pfo文件，重复电压监测，检查异常是否减少。
+        必要时迭代调整shunt_var值，直至无功收敛。
+        分析分布：
+        查看“异常及预警分布”中的Dist和Owner统计，确定问题集中的区域，优化后续调整。")
+     
 
         tabs = st.tabs(["B卡并联无功修改", "电压监测"])
         with tabs[0]:
