@@ -8,6 +8,13 @@ import importlib.util
 import sys
 import re
 
+# Check for openpyxl availability
+try:
+    import openpyxl
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+
 # Decrypt and load BPA_models
 def load_encrypted_module():
     try:
@@ -54,7 +61,6 @@ class PowerFlowRecord:
 
 def read_pfo_file(file_content: bytes) -> list:
     try:
-        # Try multiple encodings
         for encoding in ['gbk', 'utf-8', 'latin1']:
             try:
                 content = file_content.decode(encoding, errors='ignore')
@@ -390,13 +396,17 @@ class DATModifierApp:
           - 500 kV 节点：正常范围 505–550 kV，低于 500 kV 为异常低压。
           - 220 kV 节点（标称 230 kV）：正常范围 213.4–235.4 kV。
           - 低于 220 kV 的节点不监测。
-        - 查看异常节点列表和分区/所有者分布，下载结果为 Excel 文件。
+        - 查看异常节点列表和分区/所有者分布，下载结果为 Excel 文件（需要 openpyxl 库）。
+        - 如果 openpyxl 未安装，结果将以 CSV 格式下载。
         """)
+        if not OPENPYXL_AVAILABLE:
+            st.warning("未检测到 openpyxl 库，下载结果将以 CSV 格式提供。请安装 openpyxl 以启用 Excel 输出：`pip install openpyxl`")
+
         st.subheader("文件选择 (电压监测)")
         pfo_input_file = st.file_uploader("上传输入.pfo文件", type=["pfo"], key="pfo_input")
         if pfo_input_file:
             self.log_file_upload(pfo_input_file)
-        output_filename = st.text_input("输出.xlsx文件名", value="voltage_anomalies.xlsx", key="pfo_output_filename")
+        output_filename = st.text_input("输出文件名", value="voltage_anomalies.xlsx" if OPENPYXL_AVAILABLE else "voltage_anomalies.csv", key="pfo_output_filename")
         debug_mode = st.checkbox("启用调试模式（显示文件内容和解析详情）", key="pfo_debug")
 
         if st.button("执行电压监测", key="pfo_execute", type="primary"):
@@ -445,13 +455,23 @@ class DATModifierApp:
 
             # Download Results
             output_buffer = io.BytesIO()
-            anomalies_df.to_excel(output_buffer, index=False)
+            if OPENPYXL_AVAILABLE:
+                anomalies_df.to_excel(output_buffer, index=False)
+                mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                file_ext = ".xlsx"
+            else:
+                anomalies_df.to_csv(output_buffer, index=False, encoding='utf-8')
+                mime_type = "text/csv"
+                file_ext = ".csv"
+
             output_buffer.seek(0)
+            if not output_filename.endswith(file_ext):
+                output_filename += file_ext
             st.download_button(
                 label="下载异常报告",
                 data=output_buffer,
                 file_name=output_filename,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                mime=mime_type,
                 key="pfo_download"
             )
             self.log(f"电压监测完成，异常报告准备下载: {output_filename}")
