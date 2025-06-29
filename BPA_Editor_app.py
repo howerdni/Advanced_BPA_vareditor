@@ -34,7 +34,7 @@ except Exception as e:
     st.error(f"加载 BPA_models 失败: {e}")
     raise
 
-# PFO Parsing Functions (Adapted from power_flow_tool)
+# PFO Parsing Functions
 class PowerFlowRecord:
     def __init__(self, bus_name: str, rated_voltage: str, actual_voltage: str, dist: str, owner: str):
         self.bus_name = bus_name
@@ -54,14 +54,29 @@ class PowerFlowRecord:
 
 def read_pfo_file(file_content: bytes) -> list:
     try:
-        return file_content.decode('gbk', errors='ignore').splitlines()
+        # Try multiple encodings
+        for encoding in ['gbk', 'utf-8', 'latin1']:
+            try:
+                content = file_content.decode(encoding, errors='ignore')
+                lines = content.splitlines()
+                if lines:
+                    return lines
+            except UnicodeDecodeError:
+                continue
+        st.error("无法解码文件：尝试了 GBK、UTF-8 和 Latin1 编码均失败")
+        return []
     except Exception as e:
         st.error(f"无法读取文件: {e}")
         return []
 
 def find_bus_sections(lines: list) -> list:
-    bus_endings = ['B\n', 'BQ\n', 'BE\n', 'BD\n', 'BA\n', 'BS\n', 'BM\n', '-PQ\n']
-    return [i for i, line in enumerate(lines) if any(line.endswith(ending) for ending in bus_endings)]
+    bus_endings = ['B', 'BQ', 'BE', 'BD', 'BA', 'BS', 'BM', '-PQ']
+    sections = []
+    for i, line in enumerate(lines):
+        line_stripped = line.strip()
+        if any(line_stripped.endswith(ending) or line_stripped == ending for ending in bus_endings):
+            sections.append(i)
+    return sections
 
 def extract_actual_voltage(line: str) -> str:
     if 'kV/' in line:
@@ -69,9 +84,15 @@ def extract_actual_voltage(line: str) -> str:
         return line[kv_index - 7:kv_index].strip()
     return ''
 
-def parse_pfo_data(lines: list) -> list:
+def parse_pfo_data(lines: list, debug=False) -> list:
     records = []
     bus_sections = find_bus_sections(lines)
+    if debug:
+        st.write("**调试信息**")
+        st.write(f"找到的母线段落行号: {bus_sections}")
+        st.write("文件前10行（或全部如果少于10行）：")
+        st.code("\n".join(lines[:10]), language="text")
+
     if not bus_sections:
         return records
 
@@ -376,6 +397,7 @@ class DATModifierApp:
         if pfo_input_file:
             self.log_file_upload(pfo_input_file)
         output_filename = st.text_input("输出.xlsx文件名", value="voltage_anomalies.xlsx", key="pfo_output_filename")
+        debug_mode = st.checkbox("启用调试模式（显示文件内容和解析详情）", key="pfo_debug")
 
         if st.button("执行电压监测", key="pfo_execute", type="primary"):
             if not pfo_input_file:
@@ -391,7 +413,7 @@ class DATModifierApp:
                 self.log("错误: 无法解析 PFO 文件", level="ERROR")
                 return
 
-            records = parse_pfo_data(lines)
+            records = parse_pfo_data(lines, debug=debug_mode)
             if not records:
                 st.warning("未找到有效的母线数据。")
                 self.log("警告: 未找到有效的母线数据", level="WARNING")
