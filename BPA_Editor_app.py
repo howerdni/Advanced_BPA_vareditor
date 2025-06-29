@@ -537,8 +537,8 @@ class DATModifierApp:
                 self.log(f"电压监测完成，完整节点数据准备下载: {output_filename_all}")
 
     def main(self):
-        st.set_page_config(page_title="BPA Reactive Power Tuner", layout="wide")
-        st.title("BPA Reactive Power Tuner")
+        st.set_page_config(page_title="BPA潮流无功优化系统", layout="wide")
+        st.title("BPA潮流无功优化系统")
         st.markdown("""
             **注**: 本应用不会保留您上传的任何数据。
             结合BPA潮流计算的无功收敛过程，以下是使用本软件的推荐步骤：
