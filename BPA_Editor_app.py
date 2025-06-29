@@ -6,6 +6,7 @@ from datetime import datetime
 from cryptography.fernet import Fernet
 import importlib.util
 import sys
+import re
 
 # Decrypt and load BPA_models
 def load_encrypted_module():
@@ -32,6 +33,104 @@ try:
 except Exception as e:
     st.error(f"加载 BPA_models 失败: {e}")
     raise
+
+# PFO Parsing Functions (Adapted from power_flow_tool)
+class PowerFlowRecord:
+    def __init__(self, bus_name: str, rated_voltage: str, actual_voltage: str, dist: str, owner: str):
+        self.bus_name = bus_name
+        self.rated_voltage = rated_voltage
+        self.actual_voltage = actual_voltage
+        self.dist = dist
+        self.owner = owner
+
+    def to_dict(self) -> dict:
+        return {
+            'BusName': self.bus_name,
+            'RatedVoltage': self.rated_voltage,
+            'ActualVoltage': self.actual_voltage,
+            'Dist': self.dist,
+            'Owner': self.owner
+        }
+
+def read_pfo_file(file_content: bytes) -> list:
+    try:
+        return file_content.decode('gbk', errors='ignore').splitlines()
+    except Exception as e:
+        st.error(f"无法读取文件: {e}")
+        return []
+
+def find_bus_sections(lines: list) -> list:
+    bus_endings = ['B\n', 'BQ\n', 'BE\n', 'BD\n', 'BA\n', 'BS\n', 'BM\n', '-PQ\n']
+    return [i for i, line in enumerate(lines) if any(line.endswith(ending) for ending in bus_endings)]
+
+def extract_actual_voltage(line: str) -> str:
+    if 'kV/' in line:
+        kv_index = line.index('kV/')
+        return line[kv_index - 7:kv_index].strip()
+    return ''
+
+def parse_pfo_data(lines: list) -> list:
+    records = []
+    bus_sections = find_bus_sections(lines)
+    if not bus_sections:
+        return records
+
+    for i in bus_sections:
+        line = lines[i]
+        line_bytes = line.encode('gbk', errors='ignore')
+        bus_name = line_bytes[0:8].decode('gbk', errors='ignore').strip()
+        rated_voltage = line_bytes[8:14].decode('gbk', errors='ignore').strip()
+        dist = line_bytes[36:38].decode('gbk', errors='ignore').strip()
+        owner = line_bytes[38:40].decode('gbk', errors='ignore').strip()
+        actual_voltage = extract_actual_voltage(line)
+
+        try:
+            rated_voltage_float = float(rated_voltage)
+            actual_voltage_float = float(actual_voltage) if actual_voltage else None
+        except (ValueError, TypeError):
+            continue
+
+        if actual_voltage_float is not None:
+            record = PowerFlowRecord(bus_name, rated_voltage, actual_voltage, dist, owner)
+            records.append(record)
+
+    return records
+
+def check_voltage_anomalies(records: list) -> pd.DataFrame:
+    df = pd.DataFrame([record.to_dict() for record in records])
+    if df.empty:
+        return df
+
+    df['RatedVoltage'] = pd.to_numeric(df['RatedVoltage'], errors='coerce')
+    df['ActualVoltage'] = pd.to_numeric(df['ActualVoltage'], errors='coerce')
+    df = df.dropna(subset=['RatedVoltage', 'ActualVoltage'])
+
+    def classify_voltage(row):
+        rated = row['RatedVoltage']
+        actual = row['ActualVoltage']
+        if abs(rated - 500.0) < 25.0:  # 500 kV nodes
+            min_v = 500.0 * 1.01  # 505 kV
+            max_v = 500.0 * 1.10  # 550 kV
+            if actual < 500.0:
+                return 'Low', (500.0 - actual) / 500.0 * 100
+            elif actual < min_v:
+                return 'Low', (min_v - actual) / min_v * 100
+            elif actual > max_v:
+                return 'High', (actual - max_v) / max_v * 100
+        elif abs(rated - 230.0) < 25.0:  # 220 kV nodes (often rated as 230 kV)
+            min_v = 220.0 * 0.97  # 213.4 kV
+            max_v = 220.0 * 1.07  # 235.4 kV
+            if actual < min_v:
+                return 'Low', (min_v - actual) / min_v * 100
+            elif actual > max_v:
+                return 'High', (actual - max_v) / max_v * 100
+        return None, None
+
+    df[['Status', 'Deviation (%)']] = df.apply(classify_voltage, axis=1, result_type='expand')
+    anomalies = df[df['Status'].notnull()].copy()
+    if not anomalies.empty:
+        anomalies['Deviation (%)'] = anomalies['Deviation (%)'].round(2)
+    return anomalies
 
 def _format_string(value, length):
     def char_width(char):
@@ -262,17 +361,98 @@ class DATModifierApp:
             )
             self.log(f"修改完成，准备下载: {b_output_filename}")
 
+    def create_voltage_monitoring_tab(self):
+        st.markdown("""
+        **使用说明**:
+        - 上传 PSD-BPA 格式的 `.pfo` 文件以监测节点电压异常。
+        - 电压规范：
+          - 500 kV 节点：正常范围 505–550 kV，低于 500 kV 为异常低压。
+          - 220 kV 节点（标称 230 kV）：正常范围 213.4–235.4 kV。
+          - 低于 220 kV 的节点不监测。
+        - 查看异常节点列表和分区/所有者分布，下载结果为 Excel 文件。
+        """)
+        st.subheader("文件选择 (电压监测)")
+        pfo_input_file = st.file_uploader("上传输入.pfo文件", type=["pfo"], key="pfo_input")
+        if pfo_input_file:
+            self.log_file_upload(pfo_input_file)
+        output_filename = st.text_input("输出.xlsx文件名", value="voltage_anomalies.xlsx", key="pfo_output_filename")
+
+        if st.button("执行电压监测", key="pfo_execute", type="primary"):
+            if not pfo_input_file:
+                st.warning("请选择输入的 .pfo 文件。")
+                return
+            if not output_filename:
+                st.warning("请指定输出文件名。")
+                return
+
+            self.log("开始处理 PFO 文件进行电压监测...")
+            lines = read_pfo_file(pfo_input_file.read())
+            if not lines:
+                self.log("错误: 无法解析 PFO 文件", level="ERROR")
+                return
+
+            records = parse_pfo_data(lines)
+            if not records:
+                st.warning("未找到有效的母线数据。")
+                self.log("警告: 未找到有效的母线数据", level="WARNING")
+                return
+
+            anomalies_df = check_voltage_anomalies(records)
+            if anomalies_df.empty:
+                st.success("未检测到电压异常。")
+                self.log("电压监测完成：未检测到异常")
+                return
+
+            # Display Results
+            st.subheader("电压异常节点")
+            st.write(f"检测到 **{len(anomalies_df)}** 个异常节点")
+            st.dataframe(anomalies_df[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner']],
+                         use_container_width=True)
+
+            # Summary by Dist and Owner
+            st.subheader("异常分布")
+            col1, col2 = st.columns(2)
+            with col1:
+                dist_summary = anomalies_df.groupby('Dist').size().reset_index(name='Count')
+                st.write("按分区 (Dist) 分布")
+                st.dataframe(dist_summary, use_container_width=True)
+            with col2:
+                owner_summary = anomalies_df.groupby('Owner').size().reset_index(name='Count')
+                st.write("按所有者 (Owner) 分布")
+                st.dataframe(owner_summary, use_container_width=True)
+
+            # Download Results
+            output_buffer = io.BytesIO()
+            anomalies_df.to_excel(output_buffer, index=False)
+            output_buffer.seek(0)
+            st.download_button(
+                label="下载异常报告",
+                data=output_buffer,
+                file_name=output_filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="pfo_download"
+            )
+            self.log(f"电压监测完成，异常报告准备下载: {output_filename}")
+
         with st.expander("查看日志"):
-            st.markdown("**日志说明**: 显示所有操作记录，包括文件上传和修改结果。")
+            st.markdown("**日志说明**: 显示所有操作记录，包括文件上传和监测结果。")
             st.text_area("操作日志", value="\n".join(st.session_state.logs), height=200, key="log_output")
 
-def main():
-    st.set_page_config(page_title="B卡并联无功修改工具", layout="wide")
-    st.title("PSD-BPA B卡并联无功修改工具")
-    st.markdown("**使用条款**: 本应用不会保留任何用户上传的数据，所有操作均在会话中临时处理。")
+    def main(self):
+        st.set_page_config(page_title="PSD-BPA Power System Analysis Tool", layout="wide")
+        st.title("PSD-BPA Power System Analysis Tool")
+        st.markdown("**使用条款**: 本应用不会保留任何用户上传的数据，所有操作均在会话中临时处理。请确保数据安全。")
 
-    app = DATModifierApp()
-    app.create_b_shunt_var_tab()
+        tabs = st.tabs(["B卡并联无功修改", "电压监测"])
+        with tabs[0]:
+            self.create_b_shunt_var_tab()
+        with tabs[1]:
+            self.create_voltage_monitoring_tab()
+
+        with st.expander("查看日志"):
+            st.markdown("**日志说明**: 显示所有操作记录，包括文件上传、修改和监测结果。")
+            st.text_area("操作日志 (可滚动查看，不可编辑)", value="\n".join(st.session_state.logs), height=200, key="log_output_main")
 
 if __name__ == "__main__":
-    main()
+    app = DATModifierApp()
+    app.main()
