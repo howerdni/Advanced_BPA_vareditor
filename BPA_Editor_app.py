@@ -145,8 +145,8 @@ def check_voltage_anomalies(records: list) -> pd.DataFrame:
             elif actual > max_v:
                 return 'High', (actual - max_v) / max_v * 100
         elif abs(rated - 230.0) < 25.0:  # 220 kV nodes (often rated as 230 kV)
-            min_v = 220.0 * 0.97  # 213.4 kV
-            max_v = 220.0 * 1.07  # 235.4 kV
+            min_v = 220.0 * 0.95  # 209 kV
+            max_v = 220.0 * 1.10  # 242 kV
             if actual < min_v:
                 return 'Low', (min_v - actual) / min_v * 100
             elif actual > max_v:
@@ -188,6 +188,8 @@ class DATModifierApp:
             st.session_state.logs = []
         if 'uploaded_files' not in st.session_state:
             st.session_state.uploaded_files = []
+        if 'voltage_anomalies' not in st.session_state:
+            st.session_state.voltage_anomalies = None
         self.logs = st.session_state.logs
         self.uploaded_files = st.session_state.uploaded_files
         self.b_parameters = {
@@ -274,13 +276,13 @@ class DATModifierApp:
 
         dist_list = None
         if dist_f:
-            dist_list = [item.strip() for item in dist_f.split(',') if item.strip()]
+            dist_list = [item.strip() for item in re.split(r',|，', dist_f) if item.strip()]
             if not dist_list:
                 self.log(f"警告: B卡分区 '{dist_f}' 格式非法，无有效值", level="WARNING")
 
         owner_list = None
         if owner_f:
-            owner_list = [item.strip() for item in owner_f.split(',') if item.strip()]
+            owner_list = [item.strip() for item in re.split(r',|，', owner_f) if item.strip()]
             if not owner_list:
                 self.log(f"警告: B卡所有者 '{owner_f}' 格式非法，无有效值", level="WARNING")
 
@@ -325,7 +327,7 @@ class DATModifierApp:
         st.markdown("""
         **使用说明**:
         - 上传 PSD-BPA 格式的 `.dat` 文件以修改 B 卡的并联无功 (shunt_var)。
-        - 在“筛选条件”中输入分区、所有者和电压等级（可选），用逗号分隔多个值。
+        - 在“筛选条件”中输入分区、所有者和电压等级（可选），用英文逗号 (,) 或中文逗号 (，) 分隔多个值。
         - 在“修改字段”中设置 shunt_var 的新值或乘系数。
         - 点击“执行修改”生成修改后的文件，点击“下载”保存。
         """)
@@ -394,7 +396,7 @@ class DATModifierApp:
         - 上传 PSD-BPA 格式的 `.pfo` 文件以监测节点电压异常。
         - 电压规范：
           - 500 kV 节点：正常范围 505–550 kV，低于 500 kV 为异常低压。
-          - 220 kV 节点（标称 230 kV）：正常范围 213.4–235.4 kV。
+          - 220 kV 节点（标称 230 kV）：正常范围 209–242 kV。
           - 低于 220 kV 的节点不监测。
         - 查看异常节点列表和分区/所有者分布，下载结果为 Excel 文件（需要 openpyxl 库）。
         - 如果 openpyxl 未安装，结果将以 CSV 格式下载。
@@ -406,6 +408,7 @@ class DATModifierApp:
         pfo_input_file = st.file_uploader("上传输入.pfo文件", type=["pfo"], key="pfo_input")
         if pfo_input_file:
             self.log_file_upload(pfo_input_file)
+            st.session_state.voltage_anomalies = None  # Reset previous results
         output_filename = st.text_input("输出文件名", value="voltage_anomalies.xlsx" if OPENPYXL_AVAILABLE else "voltage_anomalies.csv", key="pfo_output_filename")
         debug_mode = st.checkbox("启用调试模式（显示文件内容和解析详情）", key="pfo_debug")
 
@@ -433,13 +436,36 @@ class DATModifierApp:
             if anomalies_df.empty:
                 st.success("未检测到电压异常。")
                 self.log("电压监测完成：未检测到异常")
+                st.session_state.voltage_anomalies = None
                 return
 
-            # Display Results
-            st.subheader("电压异常节点")
-            st.write(f"检测到 **{len(anomalies_df)}** 个异常节点")
-            st.dataframe(anomalies_df[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner']],
-                         use_container_width=True)
+            st.session_state.voltage_anomalies = anomalies_df  # Store results in session state
+
+        # Display Results if Available
+        if st.session_state.voltage_anomalies is not None:
+            anomalies_df = st.session_state.voltage_anomalies
+
+            # Split into 500 kV and 220 kV
+            df_500kv = anomalies_df[abs(anomalies_df['RatedVoltage'] - 500.0) < 25.0]
+            df_220kv = anomalies_df[abs(anomalies_df['RatedVoltage'] - 230.0) < 25.0]
+
+            # 500 kV Anomalies
+            st.subheader("500 kV 节点电压异常")
+            if not df_500kv.empty:
+                st.write(f"检测到 **{len(df_500kv)}** 个 500 kV 节点异常")
+                st.dataframe(df_500kv[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner']],
+                             use_container_width=True)
+            else:
+                st.info("未检测到 500 kV 节点电压异常")
+
+            # 220 kV Anomalies
+            st.subheader("220 kV 节点电压异常")
+            if not df_220kv.empty:
+                st.write(f"检测到 **{len(df_220kv)}** 个 220 kV 节点异常")
+                st.dataframe(df_220kv[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner']],
+                             use_container_width=True)
+            else:
+                st.info("未检测到 220 kV 节点电压异常")
 
             # Summary by Dist and Owner
             st.subheader("异常分布")
@@ -475,10 +501,6 @@ class DATModifierApp:
                 key="pfo_download"
             )
             self.log(f"电压监测完成，异常报告准备下载: {output_filename}")
-
-        with st.expander("查看日志"):
-            st.markdown("**日志说明**: 显示所有操作记录，包括文件上传和监测结果。")
-            st.text_area("操作日志", value="\n".join(st.session_state.logs), height=200, key="log_output")
 
     def main(self):
         st.set_page_config(page_title="PSD-BPA Power System Analysis Tool", layout="wide")
