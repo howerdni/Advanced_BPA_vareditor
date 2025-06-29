@@ -534,7 +534,7 @@ class DATModifierApp:
                 self.log(f"电压监测完成，完整节点数据准备下载: {output_filename_all}")
 
     def main(self):
-        st.set_page_config(page_title="PSD-BPA Power System Analysis Tool", layout="wide")
+        st.set_page_config(page_title="BPA Reactive Power Tuner", layout="wide")
         st.title("PSD-BPA Power System Analysis Tool")
         st.markdown("**使用条款**: 本应用不会保留任何用户上传的数据，所有操作均在会话中临时处理。请确保数据安全。")
 
