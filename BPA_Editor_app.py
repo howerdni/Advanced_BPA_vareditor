@@ -84,15 +84,9 @@ def extract_actual_voltage(line: str) -> str:
         return line[kv_index - 7:kv_index].strip()
     return ''
 
-def parse_pfo_data(lines: list, debug=False) -> list:
+def parse_pfo_data(lines: list) -> list:
     records = []
     bus_sections = find_bus_sections(lines)
-    if debug:
-        st.write("**调试信息**")
-        st.write(f"找到的母线段落行号: {bus_sections}")
-        st.write("文件前10行（或全部如果少于10行）：")
-        st.code("\n".join(lines[:10]), language="text")
-
     if not bus_sections:
         return records
 
@@ -117,19 +111,19 @@ def parse_pfo_data(lines: list, debug=False) -> list:
 
     return records
 
-def check_voltage_anomalies(records: list, debug=False) -> pd.DataFrame:
-    df = pd.DataFrame([record.to_dict() for record in records])
-    if df.empty:
-        return df
+def check_voltage_anomalies(records: list) -> tuple[pd.DataFrame, pd.DataFrame]:
+    all_nodes_df = pd.DataFrame([record.to_dict() for record in records])
+    if all_nodes_df.empty:
+        return all_nodes_df, all_nodes_df
 
-    df['RatedVoltage'] = pd.to_numeric(df['RatedVoltage'], errors='coerce')
-    df['ActualVoltage'] = pd.to_numeric(df['ActualVoltage'], errors='coerce')
-    df = df.dropna(subset=['RatedVoltage', 'ActualVoltage'])
+    all_nodes_df['RatedVoltage'] = pd.to_numeric(all_nodes_df['RatedVoltage'], errors='coerce')
+    all_nodes_df['ActualVoltage'] = pd.to_numeric(all_nodes_df['ActualVoltage'], errors='coerce')
+    all_nodes_df = all_nodes_df.dropna(subset=['RatedVoltage', 'ActualVoltage'])
 
     def classify_voltage(row):
         rated = row['RatedVoltage']
         actual = row['ActualVoltage']
-        if abs(rated - 500.0) < 25.0:  # 500 kV nodes
+        if abs(rated - 500.0) < 30:  # 500 kV nodes (including 525 kV)
             min_v = 500.0 * 1.01  # 505 kV
             max_v = 500.0 * 1.10  # 550 kV
             alert_min_v = 500.0 * 1.05  # 525 kV
@@ -146,9 +140,8 @@ def check_voltage_anomalies(records: list, debug=False) -> pd.DataFrame:
                 status = 'Alert High'
                 deviation = (actual - alert_min_v) / alert_min_v * 100
             else:
-                status, deviation = None, None
-            if debug and status:
-                st.write(f"调试: 节点 {row['BusName']}, 额定电压 {rated}, 实际电压 {actual}, 状态 {status}, 偏差 {deviation:.2f}%")
+                status = 'Normal'
+                deviation = 0.0
             return status, deviation
         elif abs(rated - 230.0) < 25.0:  # 220 kV nodes (often rated as 230 kV)
             min_v = 220.0 * 0.95  # 209 kV
@@ -160,17 +153,15 @@ def check_voltage_anomalies(records: list, debug=False) -> pd.DataFrame:
                 status = 'High'
                 deviation = (actual - max_v) / max_v * 100
             else:
-                status, deviation = None, None
-            if debug and status:
-                st.write(f"调试: 节点 {row['BusName']}, 额定电压 {rated}, 实际电压 {actual}, 状态 {status}, 偏差 {deviation:.2f}%")
+                status = 'Normal'
+                deviation = 0.0
             return status, deviation
-        return None, None
+        return 'Excluded', 0.0
 
-    df[['Status', 'Deviation (%)']] = df.apply(classify_voltage, axis=1, result_type='expand')
-    anomalies = df[df['Status'].notnull()].copy()
-    if not anomalies.empty:
-        anomalies['Deviation (%)'] = anomalies['Deviation (%)'].round(2)
-    return anomalies
+    all_nodes_df[['Status', 'Deviation (%)']] = all_nodes_df.apply(classify_voltage, axis=1, result_type='expand')
+    all_nodes_df['Deviation (%)'] = all_nodes_df['Deviation (%)'].round(2)
+    anomalies_df = all_nodes_df[all_nodes_df['Status'].isin(['Low', 'High', 'Alert High'])].copy()
+    return all_nodes_df, anomalies_df
 
 def _format_string(value, length):
     def char_width(char):
@@ -203,6 +194,8 @@ class DATModifierApp:
             st.session_state.uploaded_files = []
         if 'voltage_anomalies' not in st.session_state:
             st.session_state.voltage_anomalies = None
+        if 'all_nodes' not in st.session_state:
+            st.session_state.all_nodes = None
         self.logs = st.session_state.logs
         self.uploaded_files = st.session_state.uploaded_files
         self.b_parameters = {
@@ -408,13 +401,13 @@ class DATModifierApp:
         **使用说明**:
         - 上传 PSD-BPA 格式的 `.pfo` 文件以监测节点电压异常。
         - 电压规范：
-          - 500 kV 节点：
+          - 500 kV 节点（标称电压可能为 525 kV）：
             - 正常范围：505–550 kV
             - 警戒高压：525–550 kV（需关注但不计为异常）
             - 低于 500 kV 为异常低压
           - 220 kV 节点（标称 230 kV）：正常范围 209–242 kV
           - 低于 220 kV 的节点不监测
-        - 查看异常和警戒节点列表及分区/所有者分布，下载结果为 Excel 文件。
+        - 查看异常和警戒节点列表及分区/所有者分布，下载异常报告或完整节点数据为 Excel 文件。
         """)
         try:
             import openpyxl
@@ -426,16 +419,17 @@ class DATModifierApp:
         pfo_input_file = st.file_uploader("上传输入.pfo文件", type=["pfo"], key="pfo_input")
         if pfo_input_file:
             self.log_file_upload(pfo_input_file)
-            st.session_state.voltage_anomalies = None  # Reset previous results
-        output_filename = st.text_input("输出文件名", value="voltage_anomalies.xlsx", key="pfo_output_filename")
-        debug_mode = st.checkbox("启用调试模式（显示文件内容和解析详情）", key="pfo_debug")
+            st.session_state.voltage_anomalies = None
+            st.session_state.all_nodes = None  # Reset previous results
+        output_filename_anomalies = st.text_input("异常报告输出文件名", value="voltage_anomalies.xlsx", key="pfo_output_filename_anomalies")
+        output_filename_all = st.text_input("完整节点数据输出文件名", value="all_nodes.xlsx", key="pfo_output_filename_all")
 
         if st.button("执行电压监测", key="pfo_execute", type="primary"):
             if not pfo_input_file:
                 st.warning("请选择输入的 .pfo 文件。")
                 return
-            if not output_filename:
-                st.warning("请指定输出文件名。")
+            if not output_filename_anomalies or not output_filename_all:
+                st.warning("请指定所有输出文件名。")
                 return
 
             self.log("开始处理 PFO 文件进行电压监测...")
@@ -444,84 +438,102 @@ class DATModifierApp:
                 self.log("错误: 无法解析 PFO 文件", level="ERROR")
                 return
 
-            records = parse_pfo_data(lines, debug=debug_mode)
+            records = parse_pfo_data(lines)
             if not records:
                 st.warning("未找到有效的母线数据。")
                 self.log("警告: 未找到有效的母线数据", level="WARNING")
                 return
 
-            anomalies_df = check_voltage_anomalies(records, debug=debug_mode)
-            if anomalies_df.empty:
-                st.success("未检测到电压异常或警戒高压。")
-                self.log("电压监测完成：未检测到异常或警戒高压")
+            all_nodes_df, anomalies_df = check_voltage_anomalies(records)
+            if all_nodes_df.empty:
+                st.success("未检测到任何节点数据。")
+                self.log("电压监测完成：未检测到节点数据")
                 st.session_state.voltage_anomalies = None
+                st.session_state.all_nodes = None
                 return
 
-            st.session_state.voltage_anomalies = anomalies_df  # Store results in session state
+            st.session_state.voltage_anomalies = anomalies_df
+            st.session_state.all_nodes = all_nodes_df  # Store all nodes in session state
 
         # Display Results if Available
-        if st.session_state.voltage_anomalies is not None:
+        if st.session_state.voltage_anomalies is not None or st.session_state.all_nodes is not None:
             anomalies_df = st.session_state.voltage_anomalies
-
-            # Split into 500 kV and 220 kV
-            df_500kv = anomalies_df[abs(anomalies_df['RatedVoltage'] - 500.0) < 25.0]
-            df_220kv = anomalies_df[abs(anomalies_df['RatedVoltage'] - 230.0) < 25.0]
+            all_nodes_df = st.session_state.all_nodes
 
             # 500 kV Anomalies and Alerts
             st.subheader("500 kV 节点电压状态")
-            # Abnormal (Low or High)
-            df_500kv_abnormal = df_500kv[df_500kv['Status'].isin(['Low', 'High'])]
-            if not df_500kv_abnormal.empty:
-                st.write(f"检测到 **{len(df_500kv_abnormal)}** 个 500 kV 节点异常（低压或高压）")
-                st.dataframe(df_500kv_abnormal[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner']],
-                             use_container_width=True)
-            else:
-                st.info("未检测到 500 kV 节点电压异常")
+            if anomalies_df is not None:
+                df_500kv = anomalies_df[abs(anomalies_df['RatedVoltage'] - 500.0) < 30]
+                # Abnormal (Low or High)
+                df_500kv_abnormal = df_500kv[df_500kv['Status'].isin(['Low', 'High'])]
+                if not df_500kv_abnormal.empty:
+                    st.write(f"检测到 **{len(df_500kv_abnormal)}** 个 500 kV 节点异常（低压或高压）")
+                    st.dataframe(df_500kv_abnormal[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner']],
+                                 use_container_width=True)
+                else:
+                    st.info("未检测到 500 kV 节点电压异常")
 
-            # Alert High
-            df_500kv_alert = df_500kv[df_500kv['Status'] == 'Alert High']
-            if not df_500kv_alert.empty:
-                st.write(f"检测到 **{len(df_500kv_alert)}** 个 500 kV 节点警戒高压（525–550 kV）")
-                st.dataframe(df_500kv_alert[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner']],
-                             use_container_width=True)
-            else:
-                st.info("未检测到 500 kV 节点警戒高压")
+                # Alert High
+                df_500kv_alert = df_500kv[df_500kv['Status'] == 'Alert High']
+                if not df_500kv_alert.empty:
+                    st.write(f"检测到 **{len(df_500kv_alert)}** 个 500 kV 节点警戒高压（525–550 kV）")
+                    st.dataframe(df_500kv_alert[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner']],
+                                 use_container_width=True)
+                else:
+                    st.info("未检测到 500 kV 节点警戒高压")
 
-            # 220 kV Anomalies
-            st.subheader("220 kV 节点电压异常")
-            if not df_220kv.empty:
-                st.write(f"检测到 **{len(df_220kv)}** 个 220 kV 节点异常")
-                st.dataframe(df_220kv[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner']],
-                             use_container_width=True)
-            else:
-                st.info("未检测到 220 kV 节点电压异常")
+                # 220 kV Anomalies
+                st.subheader("220 kV 节点电压异常")
+                df_220kv = anomalies_df[abs(anomalies_df['RatedVoltage'] - 230.0) < 25.0]
+                if not df_220kv.empty:
+                    st.write(f"检测到 **{len(df_220kv)}** 个 220 kV 节点异常")
+                    st.dataframe(df_220kv[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner']],
+                                 use_container_width=True)
+                else:
+                    st.info("未检测到 220 kV 节点电压异常")
 
-            # Summary by Dist and Owner
-            st.subheader("异常及警戒分布")
-            col1, col2 = st.columns(2)
-            with col1:
-                dist_summary = anomalies_df.groupby('Dist').size().reset_index(name='Count')
-                st.write("按分区 (Dist) 分布")
-                st.dataframe(dist_summary, use_container_width=True)
-            with col2:
-                owner_summary = anomalies_df.groupby('Owner').size().reset_index(name='Count')
-                st.write("按所有者 (Owner) 分布")
-                st.dataframe(owner_summary, use_container_width=True)
+                # Summary by Dist and Owner
+                st.subheader("异常及警戒分布")
+                col1, col2 = st.columns(2)
+                with col1:
+                    dist_summary = anomalies_df.groupby('Dist').size().reset_index(name='Count')
+                    st.write("按分区 (Dist) 分布")
+                    st.dataframe(dist_summary, use_container_width=True)
+                with col2:
+                    owner_summary = anomalies_df.groupby('Owner').size().reset_index(name='Count')
+                    st.write("按所有者 (Owner) 分布")
+                    st.dataframe(owner_summary, use_container_width=True)
 
-            # Download Results
-            output_buffer = io.BytesIO()
-            anomalies_df.to_excel(output_buffer, index=False)
-            output_buffer.seek(0)
-            if not output_filename.endswith('.xlsx'):
-                output_filename += '.xlsx'
-            st.download_button(
-                label="下载异常报告",
-                data=output_buffer,
-                file_name=output_filename,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="pfo_download"
-            )
-            self.log(f"电压监测完成，异常报告准备下载: {output_filename}")
+                # Download Anomalies Report
+                output_buffer = io.BytesIO()
+                anomalies_df.to_excel(output_buffer, index=False)
+                output_buffer.seek(0)
+                if not output_filename_anomalies.endswith('.xlsx'):
+                    output_filename_anomalies += '.xlsx'
+                st.download_button(
+                    label="下载异常报告",
+                    data=output_buffer,
+                    file_name=output_filename_anomalies,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="pfo_download_anomalies"
+                )
+                self.log(f"电压监测完成，异常报告准备下载: {output_filename_anomalies}")
+
+            # Download All Nodes Report
+            if all_nodes_df is not None:
+                output_buffer_all = io.BytesIO()
+                all_nodes_df.to_excel(output_buffer_all, index=False)
+                output_buffer_all.seek(0)
+                if not output_filename_all.endswith('.xlsx'):
+                    output_filename_all += '.xlsx'
+                st.download_button(
+                    label="下载完整节点数据",
+                    data=output_buffer_all,
+                    file_name=output_filename_all,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="pfo_download_all"
+                )
+                self.log(f"电压监测完成，完整节点数据准备下载: {output_filename_all}")
 
     def main(self):
         st.set_page_config(page_title="PSD-BPA Power System Analysis Tool", layout="wide")
