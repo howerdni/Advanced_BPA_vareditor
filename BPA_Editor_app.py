@@ -124,13 +124,10 @@ def check_voltage_anomalies(records: list) -> tuple[pd.DataFrame, pd.DataFrame]:
         rated = row['RatedVoltage']
         actual = row['ActualVoltage']
         if abs(rated - 500.0) < 30:  # 500 kV nodes (including 525 kV)
-            min_v = 500.0 * 1.01  # 505 kV
+            min_v = 500.0  # 500 kV
             max_v = 500.0 * 1.10  # 550 kV
-            alert_min_v = 500.0 * 1.05  # 525 kV
-            if actual < 500.0:
-                status = 'Low'
-                deviation = (500.0 - actual) / 500.0 * 100
-            elif actual < min_v:
+            alert_min_v = 500.0 * 1.052  # 526 kV
+            if actual < min_v:
                 status = 'Low'
                 deviation = (min_v - actual) / min_v * 100
             elif actual > max_v:
@@ -402,9 +399,10 @@ class DATModifierApp:
         - 上传 PSD-BPA 格式的 `.pfo` 文件以监测节点电压异常。
         - 电压规范：
           - 500 kV 节点（标称电压可能为 525 kV）：
-            - 正常范围：505–550 kV
-            - 警戒高压：525–550 kV（需关注但不计为异常）
+            - 正常范围：500–550 kV
+            - 警戒高压：526–550 kV（需关注但不计为异常）
             - 低于 500 kV 为异常低压
+            - 高于 550 kV 为异常高压
           - 220 kV 节点（标称 230 kV）：正常范围 209–242 kV
           - 低于 220 kV 的节点不监测
         - 查看异常和警戒节点列表及分区/所有者分布，下载异常报告或完整节点数据为 Excel 文件。
@@ -476,7 +474,7 @@ class DATModifierApp:
                 # Alert High
                 df_500kv_alert = df_500kv[df_500kv['Status'] == 'Alert High']
                 if not df_500kv_alert.empty:
-                    st.write(f"检测到 **{len(df_500kv_alert)}** 个 500 kV 节点警戒高压（525–550 kV）")
+                    st.write(f"检测到 **{len(df_500kv_alert)}** 个 500 kV 节点警戒高压（526–550 kV）")
                     st.dataframe(df_500kv_alert[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner']],
                                  use_container_width=True)
                 else:
