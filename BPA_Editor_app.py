@@ -535,7 +535,7 @@ class DATModifierApp:
 
     def main(self):
         st.set_page_config(page_title="BPA Reactive Power Tuner", layout="wide")
-        st.title("PSD-BPA Power System Analysis Tool")
+        st.title("BPA Reactive Power Tuner")
         st.markdown("**使用条款**: 本应用不会保留任何用户上传的数据，所有操作均在会话中临时处理。请确保数据安全。")
 
         tabs = st.tabs(["B卡并联无功修改", "电压监测"])
