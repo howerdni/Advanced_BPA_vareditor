@@ -7,13 +7,7 @@ from cryptography.fernet import Fernet
 import importlib.util
 import sys
 import re
-
-# Check for openpyxl availability
-try:
-    import openpyxl
-    OPENPYXL_AVAILABLE = True
-except ImportError:
-    OPENPYXL_AVAILABLE = False
+import openpyxl  # Required for Excel output
 
 # Decrypt and load BPA_models
 def load_encrypted_module():
@@ -138,12 +132,15 @@ def check_voltage_anomalies(records: list) -> pd.DataFrame:
         if abs(rated - 500.0) < 25.0:  # 500 kV nodes
             min_v = 500.0 * 1.01  # 505 kV
             max_v = 500.0 * 1.10  # 550 kV
+            alert_min_v = 500.0 * 1.05  # 525 kV
             if actual < 500.0:
                 return 'Low', (500.0 - actual) / 500.0 * 100
             elif actual < min_v:
                 return 'Low', (min_v - actual) / min_v * 100
             elif actual > max_v:
                 return 'High', (actual - max_v) / max_v * 100
+            elif actual >= alert_min_v:
+                return 'Alert High', (actual - alert_min_v) / alert_min_v * 100
         elif abs(rated - 230.0) < 25.0:  # 220 kV nodes (often rated as 230 kV)
             min_v = 220.0 * 0.95  # 209 kV
             max_v = 220.0 * 1.10  # 242 kV
@@ -395,21 +392,27 @@ class DATModifierApp:
         **使用说明**:
         - 上传 PSD-BPA 格式的 `.pfo` 文件以监测节点电压异常。
         - 电压规范：
-          - 500 kV 节点：正常范围 505–550 kV，低于 500 kV 为异常低压。
-          - 220 kV 节点（标称 230 kV）：正常范围 209–242 kV。
-          - 低于 220 kV 的节点不监测。
-        - 查看异常节点列表和分区/所有者分布，下载结果为 Excel 文件（需要 openpyxl 库）。
-        - 如果 openpyxl 未安装，结果将以 CSV 格式下载。
+          - 500 kV 节点：
+            - 正常范围：505–550 kV
+            - 警戒高压：525–550 kV（需关注但不计为异常）
+            - 低于 500 kV 为异常低压
+          - 220 kV 节点（标称 230 kV）：正常范围 209–242 kV
+          - 低于 220 kV 的节点不监测
+        - 查看异常和警戒节点列表及分区/所有者分布，下载结果为 Excel 文件。
+        - 需安装 openpyxl 库以支持 Excel 输出：`pip install openpyxl`
         """)
-        if not OPENPYXL_AVAILABLE:
-            st.warning("未检测到 openpyxl 库，下载结果将以 CSV 格式提供。请安装 openpyxl 以启用 Excel 输出：`pip install openpyxl`")
+        try:
+            import openpyxl
+        except ImportError:
+            st.error("缺少 openpyxl 库，无法生成 Excel 文件。请安装：`pip install openpyxl`")
+            return
 
         st.subheader("文件选择 (电压监测)")
         pfo_input_file = st.file_uploader("上传输入.pfo文件", type=["pfo"], key="pfo_input")
         if pfo_input_file:
             self.log_file_upload(pfo_input_file)
             st.session_state.voltage_anomalies = None  # Reset previous results
-        output_filename = st.text_input("输出文件名", value="voltage_anomalies.xlsx" if OPENPYXL_AVAILABLE else "voltage_anomalies.csv", key="pfo_output_filename")
+        output_filename = st.text_input("输出文件名", value="voltage_anomalies.xlsx", key="pfo_output_filename")
         debug_mode = st.checkbox("启用调试模式（显示文件内容和解析详情）", key="pfo_debug")
 
         if st.button("执行电压监测", key="pfo_execute", type="primary"):
@@ -434,8 +437,8 @@ class DATModifierApp:
 
             anomalies_df = check_voltage_anomalies(records)
             if anomalies_df.empty:
-                st.success("未检测到电压异常。")
-                self.log("电压监测完成：未检测到异常")
+                st.success("未检测到电压异常或警戒高压。")
+                self.log("电压监测完成：未检测到异常或警戒高压")
                 st.session_state.voltage_anomalies = None
                 return
 
@@ -449,14 +452,25 @@ class DATModifierApp:
             df_500kv = anomalies_df[abs(anomalies_df['RatedVoltage'] - 500.0) < 25.0]
             df_220kv = anomalies_df[abs(anomalies_df['RatedVoltage'] - 230.0) < 25.0]
 
-            # 500 kV Anomalies
-            st.subheader("500 kV 节点电压异常")
-            if not df_500kv.empty:
-                st.write(f"检测到 **{len(df_500kv)}** 个 500 kV 节点异常")
-                st.dataframe(df_500kv[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner']],
+            # 500 kV Anomalies and Alerts
+            st.subheader("500 kV 节点电压状态")
+            # Abnormal (Low or High)
+            df_500kv_abnormal = df_500kv[df_500kv['Status'].isin(['Low', 'High'])]
+            if not df_500kv_abnormal.empty:
+                st.write(f"检测到 **{len(df_500kv_abnormal)}** 个 500 kV 节点异常（低压或高压）")
+                st.dataframe(df_500kv_abnormal[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner']],
                              use_container_width=True)
             else:
                 st.info("未检测到 500 kV 节点电压异常")
+
+            # Alert High
+            df_500kv_alert = df_500kv[df_500kv['Status'] == 'Alert High']
+            if not df_500kv_alert.empty:
+                st.write(f"检测到 **{len(df_500kv_alert)}** 个 500 kV 节点警戒高压（525–550 kV）")
+                st.dataframe(df_500kv_alert[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner']],
+                             use_container_width=True)
+            else:
+                st.info("未检测到 500 kV 节点警戒高压")
 
             # 220 kV Anomalies
             st.subheader("220 kV 节点电压异常")
@@ -468,7 +482,7 @@ class DATModifierApp:
                 st.info("未检测到 220 kV 节点电压异常")
 
             # Summary by Dist and Owner
-            st.subheader("异常分布")
+            st.subheader("异常及警戒分布")
             col1, col2 = st.columns(2)
             with col1:
                 dist_summary = anomalies_df.groupby('Dist').size().reset_index(name='Count')
@@ -481,23 +495,15 @@ class DATModifierApp:
 
             # Download Results
             output_buffer = io.BytesIO()
-            if OPENPYXL_AVAILABLE:
-                anomalies_df.to_excel(output_buffer, index=False)
-                mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                file_ext = ".xlsx"
-            else:
-                anomalies_df.to_csv(output_buffer, index=False, encoding='utf-8')
-                mime_type = "text/csv"
-                file_ext = ".csv"
-
+            anomalies_df.to_excel(output_buffer, index=False)
             output_buffer.seek(0)
-            if not output_filename.endswith(file_ext):
-                output_filename += file_ext
+            if not output_filename.endswith('.xlsx'):
+                output_filename += '.xlsx'
             st.download_button(
                 label="下载异常报告",
                 data=output_buffer,
                 file_name=output_filename,
-                mime=mime_type,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="pfo_download"
             )
             self.log(f"电压监测完成，异常报告准备下载: {output_filename}")
