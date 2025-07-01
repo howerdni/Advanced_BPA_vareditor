@@ -7,7 +7,7 @@ from cryptography.fernet import Fernet
 import importlib.util
 import sys
 import re
-import openpyxl  # Required for Excel output
+import openpyxl
 import os
 
 # Decrypt and load BPA_models
@@ -40,12 +40,13 @@ except Exception as e:
 
 # PFO Parsing Functions
 class PowerFlowRecord:
-    def __init__(self, bus_name: str, rated_voltage: str, actual_voltage: str, dist: str, owner: str):
+    def __init__(self, bus_name: str, rated_voltage: str, actual_voltage: str, dist: str, owner: str, unallocated_q: str = None):
         self.bus_name = bus_name
         self.rated_voltage = rated_voltage
         self.actual_voltage = actual_voltage
         self.dist = dist
         self.owner = owner
+        self.unallocated_q = unallocated_q
 
     def to_dict(self) -> dict:
         return {
@@ -53,7 +54,8 @@ class PowerFlowRecord:
             'RatedVoltage': self.rated_voltage,
             'ActualVoltage': self.actual_voltage,
             'Dist': self.dist,
-            'Owner': self.owner
+            'Owner': self.owner,
+            'UnallocatedReactivePower': self.unallocated_q
         }
 
 def read_pfo_file(file_content: bytes) -> list:
@@ -77,7 +79,8 @@ def find_bus_sections(lines: list) -> list:
     sections = []
     for i, line in enumerate(lines):
         line_stripped = line.strip()
-        if any(line_stripped.endswith(ending) or line_stripped == ending for ending in bus_endings):
+        # Check if line ends with a bus ending or contains it (allowing for trailing data)
+        if any(ending in line_stripped[-10:] for ending in bus_endings):
             sections.append(i)
     return sections
 
@@ -101,16 +104,40 @@ def parse_pfo_data(lines: list) -> list:
         dist = line_bytes[36:38].decode('gbk', errors='ignore').strip()
         owner = line_bytes[38:40].decode('gbk', errors='ignore').strip()
         actual_voltage = extract_actual_voltage(line)
+        unallocated_q = None
+
+        # Check the current and subsequent lines for unallocated reactive power
+        for j in range(i, min(i + 10, len(lines))):  # Limit scan to avoid excessive looping
+            current_line = lines[j].strip()
+            if '未安排无功' in current_line:
+                try:
+                    # Extract the number before "未安排无功" using regex to handle negative numbers and decimals
+                    match = re.search(r'([-]?\d+\.\d+|\d+\.\d+)\s*未安排无功', current_line)
+                    if match:
+                        unallocated_q = float(match.group(1))
+                        st.session_state.logs.append(f"[DEBUG] Found unallocated reactive power for {bus_name}: {unallocated_q}")
+                    else:
+                        st.session_state.logs.append(f"[DEBUG] Failed to parse unallocated reactive power in line: {current_line}")
+                    break
+                except (ValueError, IndexError) as e:
+                    st.session_state.logs.append(f"[DEBUG] Error parsing unallocated reactive power for {bus_name}: {e}")
+                    break
+            # Stop if we hit another bus section
+            if any(current_line.endswith(ending) or ending in current_line[-10:] for ending in ['B', 'BQ', 'BE', 'BD', 'BA', 'BS', 'BM', '-PQ']):
+                if j != i:  # Don't break on the current bus line
+                    break
 
         try:
             rated_voltage_float = float(rated_voltage)
             actual_voltage_float = float(actual_voltage) if actual_voltage else None
         except (ValueError, TypeError):
+            st.session_state.logs.append(f"[DEBUG] Invalid voltage for {bus_name}: rated={rated_voltage}, actual={actual_voltage}")
             continue
 
         if actual_voltage_float is not None:
-            record = PowerFlowRecord(bus_name, rated_voltage, actual_voltage, dist, owner)
+            record = PowerFlowRecord(bus_name, rated_voltage, actual_voltage, dist, owner, unallocated_q)
             records.append(record)
+            st.session_state.logs.append(f"[DEBUG] Added record for {bus_name}, unallocated_q={unallocated_q}")
 
     return records
 
@@ -121,31 +148,32 @@ def check_voltage_anomalies(records: list) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     all_nodes_df['RatedVoltage'] = pd.to_numeric(all_nodes_df['RatedVoltage'], errors='coerce')
     all_nodes_df['ActualVoltage'] = pd.to_numeric(all_nodes_df['ActualVoltage'], errors='coerce')
+    all_nodes_df['UnallocatedReactivePower'] = pd.to_numeric(all_nodes_df['UnallocatedReactivePower'], errors='coerce')
     all_nodes_df = all_nodes_df.dropna(subset=['RatedVoltage', 'ActualVoltage'])
 
     def classify_voltage(row):
         rated = row['RatedVoltage']
         actual = row['ActualVoltage']
         if abs(rated - 500.0) < 30:  # 500 kV nodes (including 525 kV)
-            min_v = 500.0  # 500 kV
-            max_v = 500.0 * 1.10  # 550 kV
-            alert_min_v = 500.0 * 1.052  # 526 kV
+            min_v = 500.0
+            max_v = 500.0 * 1.10
+            alert_min_v = 500.0 * 1.052
             if actual < min_v:
                 status = 'Low'
                 deviation = (min_v - actual) / min_v * 100
             elif actual > max_v:
                 status = 'High'
                 deviation = (actual - max_v) / max_v * 100
-            elif actual >= alert_min_v - 0.1 and actual <= max_v + 0.1:  # Tolerance for floating-point
+            elif actual >= alert_min_v - 0.1 and actual <= max_v + 0.1:
                 status = 'Alert High'
                 deviation = (actual - alert_min_v) / alert_min_v * 100
             else:
                 status = 'Normal'
                 deviation = 0.0
             return status, deviation
-        elif abs(rated - 230.0) < 25.0:  # 220 kV nodes (often rated as 230 kV)
-            min_v = 220.0 * 0.95  # 209 kV
-            max_v = 220.0 * 1.10  # 242 kV
+        elif abs(rated - 230.0) < 25.0:  # 220 kV nodes
+            min_v = 220.0 * 0.95
+            max_v = 220.0 * 1.10
             if actual < min_v:
                 status = 'Low'
                 deviation = (min_v - actual) / min_v * 100
@@ -216,7 +244,7 @@ class DATModifierApp:
     def log_file_upload(self, file):
         if file is not None:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            file_size = len(file.getvalue()) / 1024  # Size in KB
+            file_size = len(file.getvalue()) / 1024
             log_message = f"[{timestamp}] [UPLOAD] File uploaded: {file.name}, Size: {file_size:.2f} KB"
             self.logs.append(log_message)
             self.uploaded_files.append({
@@ -399,7 +427,7 @@ class DATModifierApp:
     def create_voltage_monitoring_tab(self):
         st.markdown("""
         **使用说明**:
-        - 上传 PSD-BPA 格式的 `.pfo` 文件以监测节点电压异常。
+        - 上传 PSD-BPA 格式的 `.pfo` 文件以监测节点电压异常和未安排无功。
         - 电压规范：
           - 500 kV 节点（标称电压可能为 525 kV）：
             - 正常范围：500–550 kV
@@ -408,7 +436,8 @@ class DATModifierApp:
             - 高于 550 kV 为异常高压
           - 220 kV 节点（标称 230 kV）：正常范围 209–242 kV
           - 低于 220 kV 的节点不监测
-        - 查看异常和预警节点列表及分区/所有者分布，下载异常报告或完整节点数据为 Excel 文件。
+        - 未安排无功：检查哪些节点存在未安排无功（MVar），并列出其值。
+        - 查看异常、预警节点和未安排无功列表及分区/所有者分布，下载异常报告或完整节点数据为 Excel 文件。
         """)
         try:
             import openpyxl
@@ -421,7 +450,7 @@ class DATModifierApp:
         if pfo_input_file:
             self.log_file_upload(pfo_input_file)
             st.session_state.voltage_anomalies = None
-            st.session_state.all_nodes = None  # Reset previous results
+            st.session_state.all_nodes = None
         output_filename_anomalies = st.text_input("异常报告输出文件名", value="voltage_anomalies.xlsx", key="pfo_output_filename_anomalies")
         output_filename_all = st.text_input("完整节点数据输出文件名", value="all_nodes.xlsx", key="pfo_output_filename_all")
 
@@ -454,31 +483,39 @@ class DATModifierApp:
                 return
 
             st.session_state.voltage_anomalies = anomalies_df
-            st.session_state.all_nodes = all_nodes_df  # Store all nodes in session state
+            st.session_state.all_nodes = all_nodes_df
 
         # Display Results if Available
         if st.session_state.voltage_anomalies is not None or st.session_state.all_nodes is not None:
             anomalies_df = st.session_state.voltage_anomalies
             all_nodes_df = st.session_state.all_nodes
 
+            # Unallocated Reactive Power
+            st.subheader("未安排无功节点")
+            unallocated_df = all_nodes_df[all_nodes_df['UnallocatedReactivePower'].notnull()]
+            if not unallocated_df.empty:
+                st.write(f"检测到 **{len(unallocated_df)}** 个节点存在未安排无功")
+                st.dataframe(unallocated_df[['BusName', 'RatedVoltage', 'ActualVoltage', 'UnallocatedReactivePower', 'Dist', 'Owner']],
+                             use_container_width=True)
+            else:
+                st.info("未检测到存在未安排无功的节点")
+
             # 500 kV Anomalies and Alerts
             st.subheader("500 kV 节点电压状态")
             if anomalies_df is not None:
                 df_500kv = anomalies_df[abs(anomalies_df['RatedVoltage'] - 500.0) < 30]
-                # Abnormal (Low or High)
                 df_500kv_abnormal = df_500kv[df_500kv['Status'].isin(['Low', 'High'])]
                 if not df_500kv_abnormal.empty:
                     st.write(f"检测到 **{len(df_500kv_abnormal)}** 个 500 kV 节点异常（低压或高压）")
-                    st.dataframe(df_500kv_abnormal[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner']],
+                    st.dataframe(df_500kv_abnormal[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner', 'UnallocatedReactivePower']],
                                  use_container_width=True)
                 else:
                     st.info("未检测到 500 kV 节点电压异常")
 
-                # Alert High
                 df_500kv_alert = df_500kv[df_500kv['Status'] == 'Alert High']
                 if not df_500kv_alert.empty:
                     st.write(f"检测到 **{len(df_500kv_alert)}** 个 500 kV 节点预警高压（526–550 kV）")
-                    st.dataframe(df_500kv_alert[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner']],
+                    st.dataframe(df_500kv_alert[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner', 'UnallocatedReactivePower']],
                                  use_container_width=True)
                 else:
                     st.info("未检测到 500 kV 节点预警高压")
@@ -488,7 +525,7 @@ class DATModifierApp:
                 df_220kv = anomalies_df[abs(anomalies_df['RatedVoltage'] - 230.0) < 25.0]
                 if not df_220kv.empty:
                     st.write(f"检测到 **{len(df_220kv)}** 个 220 kV 节点异常")
-                    st.dataframe(df_220kv[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner']],
+                    st.dataframe(df_220kv[['BusName', 'RatedVoltage', 'ActualVoltage', 'Status', 'Deviation (%)', 'Dist', 'Owner', 'UnallocatedReactivePower']],
                                  use_container_width=True)
                 else:
                     st.info("未检测到 220 kV 节点电压异常")
@@ -545,23 +582,24 @@ class DATModifierApp:
             1. **确认有功收敛**：
                - 发现BPA数据在微调后，发生不收敛，首先确保BPA潮流计算已实现有功功率收敛，倒退至最近一次收敛状态，生成.pfo文件。
                - **注**：.dat文件的设置语句需要将P_OUTPUT_LIST设置为FULL，即/P_OUTPUT_LIST,FULL\，以使pfo文件输出完整的潮流计算结果。
-            2. **分析电压异常**：
+            2. **分析电压异常和未安排无功**：
                - 如果你的.dat数据相应的.dxt文件的地理接线信息是完整的，可以使用BPA地理接线图模块中的电压等高线热力图直观监测电压异常的节点。否则，可进行如下步骤：
                - 在“电压监测”标签上传.pfo文件，执行电压监测。
-               - 查看500 kV和220 kV节点的异常（Low/High）和500 kV警戒高压（Alert High）表格。
-               - 记录异常节点的Dist、Owner和BusName，以及建议调整方向：
+               - 查看500 kV和220 kV节点的异常（Low/High）和500 kV警戒高压（Alert High）表格，以及未安排无功的节点。
+               - 记录异常节点和未安排无功节点的Dist、Owner和BusName，以及建议调整方向：
                  - 低压（Low）：通常需要增加shunt_var（正值，表示更多电容）。
                  - 高压（High）或警戒高压（Alert High）：可能需要减少shunt_var（负值，表示更多电感）。
+                 - 未安排无功：可能需要调整shunt_var以分配这些无功，方向取决于电压状态。
             3. **调整shunt_var**：
                - 切换到“B卡并联无功修改”标签，上传原始.dat文件。
-               - 输入异常节点的dist、owner和vol_rank（一般修改37kV的无功装接节点）进行筛选。
+               - 输入异常节点或未安排无功节点的dist、owner和vol_rank（一般修改37kV的无功装接节点）进行筛选。
                - 设置shunt_var修改：
-                 - 对于低压节点，尝试“设值”（如100）或“乘系数”（如1.2）增加容性无功。
+                 - 对于低压节点或高未安排无功，尝试“设值”（如100）或“乘系数”（如1.2）增加容性无功。
                  - 对于高压节点，尝试“设值”（如-50）或“乘系数”（如0.8或者-1.0）减少容性无功或调整为感性无功。
                - 下载修改后的.dat文件。
             4. **验证收敛**：
                - 使用修改后的.dat文件运行BPA潮流计算。
-               - 生成新的.pfo文件，重复电压监测，检查异常是否减少。
+               - 生成新的.pfo文件，重复电压监测，检查异常和未安排无功是否减少。
                - 必要时迭代调整shunt_var值，直至无功收敛。
             5. **分析分布**：
                - 查看“异常及预警分布”中的Dist和Owner统计，确定问题集中的区域，优化后续调整。
